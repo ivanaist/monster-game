@@ -1,0 +1,2807 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Monster Game</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: monospace; }
+canvas { display: block; image-rendering: pixelated; }
+#touchControls { display: none; position: fixed; bottom: 0; left: 0; right: 0; z-index: 10; }
+.touch-btn { position: fixed; width: 60px; height: 60px; border-radius: 50%; background: rgba(255,255,255,0.15); border: 2px solid rgba(255,255,255,0.3); color: #fff; font-size: 18px; font-family: monospace; display: flex; align-items: center; justify-content: center; user-select: none; -webkit-user-select: none; touch-action: none; }
+.touch-btn:active { background: rgba(255,255,255,0.35); }
+#btn-left { bottom: 80px; left: 20px; }
+#btn-right { bottom: 80px; left: 100px; }
+#btn-jump { bottom: 80px; right: 20px; }
+#btn-punch { bottom: 150px; right: 90px; font-size: 14px; }
+#btn-kick { bottom: 150px; right: 20px; font-size: 14px; }
+#btn-flash { bottom: 20px; right: 55px; font-size: 12px; width: 50px; height: 50px; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="touchControls">
+  <div id="btn-left" class="touch-btn">&larr;</div>
+  <div id="btn-right" class="touch-btn">&rarr;</div>
+  <div id="btn-jump" class="touch-btn">&#8593;</div>
+  <div id="btn-punch" class="touch-btn">1</div>
+  <div id="btn-kick" class="touch-btn">2</div>
+  <div id="btn-flash" class="touch-btn">F</div>
+</div>
+<script>
+// ==================== MONSTER GAME ====================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// === SCREEN SETUP ===
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Touch detection
+const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+if (isMobile) document.getElementById('touchControls').style.display = 'block';
+
+// === GAME CONSTANTS ===
+const GRAVITY = 0.6;
+const TILE = 40;
+const PLAYER_W = 24;
+const PLAYER_H = 36;
+
+// === COLORS ===
+const COLORS = {
+  bg: '#0a0a12',
+  wall: '#1a1a2e',
+  wallLight: '#252540',
+  floor: '#2a1a1a',
+  floorLight: '#3a2525',
+  door: '#4a3030',
+  disco: '#1a1a30',
+  discoAccent: '#ff00ff',
+  kitchen: '#1a1520',
+  sleep: '#12101e',
+  wc: '#101820',
+  quiet: '#0e1210',
+  lobby: '#1a1218',
+  coin: '#ffd700',
+  apple: '#ff3333',
+  appleLeaf: '#33aa33',
+  flashlight: '#ffff66',
+  snowball: '#ccddff',
+  hpBar: '#cc2222',
+  hungerBar: '#cc8822',
+  text: '#ffffff'
+};
+
+// === WORLD MAP ===
+// Rooms: each room is { x, y, w, h, name, color, monsters[], items[] }
+const WORLD_W = 2000;
+const WORLD_H = 1300;
+
+// Room definitions (side-view, y increases downward)
+// Layout:
+//   [Sleep Place] --- [Disco Room] --- [WC] --- [Attic]
+//                     |
+//   [Quiet Place] --- [Kitchen] --- [Lobby] --- [Laundry]
+//                     |                |
+//                     [Basement] --- [Pool]
+//
+const W = TILE / 2; // wall thickness
+const DOOR_H = 70; // door opening height
+
+const rooms = [
+  { name: 'Lobby',       x: 1000, y: 500, w: 500, h: 350, color: COLORS.lobby, floorColor: COLORS.floor },
+  { name: 'Disco Room',  x: 500,  y: 100, w: 600, h: 350, color: COLORS.disco, floorColor: '#2a1a2a' },
+  { name: 'Sleep Place', x: 0,    y: 100, w: 500, h: 350, color: COLORS.sleep, floorColor: '#1a1520' },
+  { name: 'WC',          x: 1100, y: 100, w: 400, h: 350, color: COLORS.wc, floorColor: '#151d25' },
+  { name: 'Kitchen',     x: 500,  y: 500, w: 500, h: 350, color: COLORS.kitchen, floorColor: '#201520' },
+  { name: 'Quiet Place', x: 0,    y: 500, w: 500, h: 350, color: COLORS.quiet, floorColor: '#121a15' },
+  // NEW ROOMS
+  { name: 'Attic',       x: 1500, y: 100, w: 450, h: 350, color: '#12100a', floorColor: '#1a1510' },
+  { name: 'Laundry',     x: 1500, y: 500, w: 450, h: 350, color: '#101518', floorColor: '#151a20' },
+  { name: 'Basement',    x: 500,  y: 900, w: 500, h: 350, color: '#080808', floorColor: '#0e0e0e' },
+  { name: 'Pool',        x: 1000, y: 900, w: 500, h: 350, color: '#0a1018', floorColor: '#101520' },
+];
+
+// Build platforms with door openings
+const platforms = [];
+const doors = [];
+
+// Helper: add a wall segment with an optional door opening
+function addWall(x, y, w, h, color, doorGap) {
+  // doorGap: { pos, size } — gap starts at pos (relative to wall start along its length), size pixels wide/tall
+  if (!doorGap) {
+    platforms.push({ x, y, w, h, color });
+    return;
+  }
+  if (w > h) {
+    // Horizontal wall (floor/ceiling) — door is a horizontal gap
+    const gapStart = x + doorGap.pos;
+    const gapEnd = gapStart + doorGap.size;
+    if (gapStart > x) platforms.push({ x, y, w: gapStart - x, h, color });
+    if (gapEnd < x + w) platforms.push({ x: gapEnd, y, w: (x + w) - gapEnd, h, color });
+    doors.push({ x: gapStart, y, w: doorGap.size, h });
+  } else {
+    // Vertical wall — door is a vertical gap
+    const gapStart = y + doorGap.pos;
+    const gapEnd = gapStart + doorGap.size;
+    if (gapStart > y) platforms.push({ x, y, w, h: gapStart - y, color });
+    if (gapEnd < y + h) platforms.push({ x, y: gapEnd, w, h: (y + h) - gapEnd, color });
+    doors.push({ x, y: gapStart, w, h: doorGap.size });
+  }
+}
+
+// Define which rooms connect horizontally (left room right wall → right room left wall)
+const hConnections = [
+  ['Sleep Place', 'Disco Room'],
+  ['Disco Room', 'WC'],
+  ['WC', 'Attic'],
+  ['Quiet Place', 'Kitchen'],
+  ['Kitchen', 'Lobby'],
+  ['Lobby', 'Laundry'],
+  ['Basement', 'Pool'],
+];
+// Vertical connections (top room floor → bottom room ceiling)
+const vConnections = [
+  ['Disco Room', 'Kitchen'],
+  ['Lobby', 'Pool'],
+  ['Kitchen', 'Basement'],
+];
+
+// Which rooms have a left/right/floor/ceiling door?
+const hasRightDoor = new Set(hConnections.map(c => c[0]));
+const hasLeftDoor = new Set(hConnections.map(c => c[1]));
+const hasFloorDoor = new Set(vConnections.map(c => c[0]));
+const hasCeilDoor = new Set(vConnections.map(c => c[1]));
+
+rooms.forEach(r => {
+  const floorY = r.y + r.h - TILE;
+  const doorBottom = r.h - TILE - DOOR_H;
+
+  // Floor
+  addWall(r.x, floorY, r.w, TILE, r.floorColor, hasFloorDoor.has(r.name) ? { pos: 180, size: 120 } : null);
+  // Ceiling
+  addWall(r.x, r.y, r.w, W, COLORS.wall, hasCeilDoor.has(r.name) ? { pos: 180, size: 120 } : null);
+  // Left wall
+  addWall(r.x, r.y, W, r.h, COLORS.wall, hasLeftDoor.has(r.name) ? { pos: doorBottom, size: DOOR_H } : null);
+  // Right wall
+  addWall(r.x + r.w - W, r.y, W, r.h, COLORS.wall, hasRightDoor.has(r.name) ? { pos: doorBottom, size: DOOR_H } : null);
+});
+
+// Build staircases for each vertical connection
+function buildStairs(topRoom, bottomRoom) {
+  const gapX = topRoom.x + 180; // matches the floor/ceiling gap position
+  const gapW = 120;
+  const topFloor = topRoom.y + topRoom.h - TILE;
+  const bottomCeil = bottomRoom.y;
+  // Stairs go from just below top floor to just above bottom floor
+  const startY = bottomRoom.y + bottomRoom.h - TILE - 40;
+  const endY = topFloor - 30;
+  const stepSpacing = 45;
+  const stepW = 50;
+  let step = 0;
+  for (let y = startY; y > endY; y -= stepSpacing) {
+    const xOff = (step % 2 === 0) ? 5 : gapW - stepW - 5;
+    platforms.push({
+      x: gapX + xOff,
+      y: y,
+      w: stepW, h: 8, color: '#3a3a4a'
+    });
+    step++;
+  }
+}
+
+// Disco Room ↔ Kitchen stairs
+buildStairs(rooms[1], rooms[4]);
+// Lobby ↔ Pool stairs
+buildStairs(rooms[0], rooms.find(r => r.name === 'Pool'));
+// Kitchen ↔ Basement stairs
+buildStairs(rooms[4], rooms.find(r => r.name === 'Basement'));
+
+// === FURNITURE (solid platforms you can jump on) ===
+// Sleep Place (x:0, y:100, h:350, floor at y=410)
+const sleepR = rooms[2];
+const sleepFloor = sleepR.y + sleepR.h - TILE;
+platforms.push({ x: sleepR.x + 60, y: sleepFloor - 25, w: 80, h: 8, color: '#3a2020', furniture: true });   // Bed 1 top
+platforms.push({ x: sleepR.x + 300, y: sleepFloor - 25, w: 80, h: 8, color: '#3a2020', furniture: true });  // Bed 2 top
+platforms.push({ x: sleepR.x + 200, y: sleepFloor - 30, w: 25, h: 8, color: '#2a1a15', furniture: true }); // Nightstand
+
+// WC (x:1100, y:100, h:350, floor at y=410)
+const wcR = rooms[3];
+const wcFloor = wcR.y + wcR.h - TILE;
+platforms.push({ x: wcR.x + 55, y: wcFloor - 32, w: 35, h: 8, color: '#dddddd', furniture: true });  // Toilet 1
+platforms.push({ x: wcR.x + 195, y: wcFloor - 32, w: 35, h: 8, color: '#dddddd', furniture: true }); // Toilet 2
+platforms.push({ x: wcR.x + 130, y: wcFloor - 50, w: 30, h: 8, color: '#bbbbcc', furniture: true }); // Sink
+
+// Kitchen (x:500, y:500, h:350, floor at y=810)
+const kitchenR = rooms[4];
+const kitchenFloor = kitchenR.y + kitchenR.h - TILE;
+platforms.push({ x: kitchenR.x + 50, y: kitchenFloor - 40, w: 60, h: 8, color: '#333333', furniture: true });  // Stove top
+platforms.push({ x: kitchenR.x + 150, y: kitchenFloor - 38, w: 100, h: 8, color: '#3a3025', furniture: true }); // Counter top
+platforms.push({ x: kitchenR.x + 350, y: kitchenFloor - 70, w: 40, h: 8, color: '#444455', furniture: true }); // Fridge top
+
+// Disco Room (x:500, y:100, h:350, floor at y=410)
+const discoR = rooms[1];
+const discoFloor = discoR.y + discoR.h - TILE;
+platforms.push({ x: discoR.x + 40, y: discoFloor - 50, w: 30, h: 8, color: '#222', furniture: true });           // Speaker L
+platforms.push({ x: discoR.x + discoR.w - 70, y: discoFloor - 50, w: 30, h: 8, color: '#222', furniture: true }); // Speaker R
+platforms.push({ x: discoR.x + discoR.w / 2 - 40, y: discoFloor - 35, w: 80, h: 8, color: '#1a1a2a', furniture: true }); // DJ booth
+
+// Quiet Place (x:0, y:500, h:350, floor at y=810)
+const quietR = rooms[5];
+const quietFloor = quietR.y + quietR.h - TILE;
+platforms.push({ x: quietR.x + 50, y: quietFloor - 70, w: 50, h: 8, color: '#2a1a10', furniture: true });  // Bookshelf top
+platforms.push({ x: quietR.x + 175, y: quietFloor - 40, w: 50, h: 8, color: '#3a2020', furniture: true }); // Armchair top
+
+// Lobby (x:1000, y:500, h:350, floor at y=810)
+const lobbyR = rooms[0];
+const lobbyFloor = lobbyR.y + lobbyR.h - TILE;
+platforms.push({ x: lobbyR.x + 180, y: lobbyFloor - 43, w: 120, h: 8, color: '#3a2a20', furniture: true }); // Reception desk
+platforms.push({ x: lobbyR.x + 45, y: lobbyFloor - 45, w: 90, h: 8, color: '#4a2828', furniture: true });   // Couch top
+
+// Attic (x:1500, y:100, h:350, floor at y=410)
+const atticR = rooms.find(r => r.name === 'Attic');
+const atticFloor = atticR.y + atticR.h - TILE;
+platforms.push({ x: atticR.x + 50, y: atticFloor - 30, w: 75, h: 8, color: '#3a2a15', furniture: true }); // Boxes
+platforms.push({ x: atticR.x + 250, y: atticFloor - 35, w: 40, h: 8, color: '#2a1a0a', furniture: true }); // Rocking chair
+
+// Laundry (x:1500, y:500, h:350, floor at y=810)
+const laundryR = rooms.find(r => r.name === 'Laundry');
+const laundryFloor = laundryR.y + laundryR.h - TILE;
+platforms.push({ x: laundryR.x + 50, y: laundryFloor - 45, w: 140, h: 8, color: '#555566', furniture: true }); // Washing machines
+platforms.push({ x: laundryR.x + 300, y: laundryFloor - 35, w: 60, h: 8, color: '#888', furniture: true }); // Ironing board
+
+// Basement (x:500, y:900, h:350, floor at y=1210)
+const basementR = rooms.find(r => r.name === 'Basement');
+const basementFloor = basementR.y + basementR.h - TILE;
+platforms.push({ x: basementR.x + 60, y: basementFloor - 40, w: 90, h: 8, color: '#2a1a0a', furniture: true }); // Crates
+platforms.push({ x: basementR.x + 60, y: basementFloor - 70, w: 40, h: 8, color: '#2a1a0a', furniture: true }); // Stacked crate
+
+// Pool (x:1000, y:900, h:350, floor at y=1210)
+const poolR = rooms.find(r => r.name === 'Pool');
+const poolFloor = poolR.y + poolR.h - TILE;
+platforms.push({ x: poolR.x + 370, y: poolFloor - 40, w: 50, h: 8, color: '#666', furniture: true }); // Diving board
+
+// === WORLD BOUNDARY WALLS ===
+// Top wall
+platforms.push({ x: 0, y: 0, w: WORLD_W, h: W, color: '#111' });
+// Bottom wall
+platforms.push({ x: 0, y: WORLD_H - W, w: WORLD_W, h: W, color: '#111' });
+// Left wall
+platforms.push({ x: 0, y: 0, w: W, h: WORLD_H, color: '#111' });
+// Right wall
+platforms.push({ x: WORLD_W - W, y: 0, w: W, h: WORLD_H, color: '#111' });
+
+// === ITEMS ON MAP ===
+// Place items relative to room positions
+const items = [
+  // Scary coins spread across rooms
+  { type: 'coin', x: 250, y: 390, collected: false },   // Sleep Place
+  { type: 'coin', x: 700, y: 390, collected: false },   // Disco Room
+  { type: 'coin', x: 1000, y: 390, collected: false },  // Disco Room
+  { type: 'coin', x: 1250, y: 390, collected: false },  // WC
+  { type: 'coin', x: 150, y: 790, collected: false },   // Quiet Place
+  { type: 'coin', x: 700, y: 790, collected: false },   // Kitchen
+  { type: 'coin', x: 1200, y: 790, collected: false },  // Lobby
+  { type: 'coin', x: 1400, y: 790, collected: false },  // Lobby
+  // Apples near disco room
+  { type: 'apple', x: 650, y: 395, collected: false },
+  { type: 'apple', x: 900, y: 395, collected: false },
+  { type: 'apple', x: 1050, y: 395, collected: false },
+  // Flashlights
+  { type: 'flashlight', x: 350, y: 790, collected: false },  // Quiet Place
+  { type: 'flashlight', x: 850, y: 395, collected: false },  // Disco Room
+  // Snowballs
+  { type: 'snowball', x: 1100, y: 395, collected: false },   // Disco Room
+  { type: 'snowball', x: 200, y: 790, collected: false },    // Quiet Place
+  // NEW ROOM ITEMS
+  // Attic
+  { type: 'coin', x: 1650, y: 390, collected: false },
+  { type: 'coin', x: 1800, y: 390, collected: false },
+  { type: 'flashlight', x: 1700, y: 390, collected: false },
+  // Laundry
+  { type: 'coin', x: 1600, y: 790, collected: false },
+  { type: 'coin', x: 1800, y: 790, collected: false },
+  { type: 'snowball', x: 1700, y: 790, collected: false },
+  // Basement
+  { type: 'coin', x: 600, y: 1190, collected: false },
+  { type: 'coin', x: 850, y: 1190, collected: false },
+  { type: 'flashlight', x: 750, y: 1190, collected: false },
+  { type: 'snowball', x: 700, y: 1190, collected: false },
+  // Pool
+  { type: 'coin', x: 1100, y: 1190, collected: false },
+  { type: 'coin', x: 1350, y: 1190, collected: false },
+  { type: 'apple', x: 1200, y: 1190, collected: false },
+  { type: 'snowball', x: 1400, y: 1190, collected: false },
+];
+
+// === MONSTERS ===
+const monsterDefs = [
+  { id: 1, name: 'Shadow Creep', hp: 20, maxHp: 20, damage: 2, room: 'Sleep Place', color: '#3a1a4a', eyeColor: '#ff3333', killMethod: 'flashlight', speed: 0.8 },
+  { id: 2, name: 'Toilet Terror', hp: 25, maxHp: 25, damage: 3, room: 'WC', color: '#1a3a3a', eyeColor: '#ff6600', killMethod: 'flashlight', speed: 1.0 },
+  { id: 3, name: 'Kitchen Nightmare', hp: 30, maxHp: 30, damage: 4, room: 'Kitchen', color: '#3a2a1a', eyeColor: '#ffff00', killMethod: 'kick', speed: 1.2 },
+  { id: 4, name: 'The Chef', hp: 35, maxHp: 35, damage: 4, room: 'Kitchen', color: '#2a0a0a', eyeColor: '#ff0000', killMethod: 'punch', speed: 1.4 },
+  // NEW MONSTERS
+  { id: 5, name: 'The Cobweb', hp: 22, maxHp: 22, damage: 3, room: 'Attic', color: '#4a4a3a', eyeColor: '#aaffaa', killMethod: 'flashlight', speed: 0.6 },
+  { id: 6, name: 'Washing Machine', hp: 28, maxHp: 28, damage: 3, room: 'Laundry', color: '#3a3a4a', eyeColor: '#66ccff', killMethod: 'kick', speed: 1.1 },
+  { id: 7, name: 'The Drowner', hp: 32, maxHp: 32, damage: 5, room: 'Pool', color: '#1a2a3a', eyeColor: '#00ffff', killMethod: 'punch', speed: 0.9 },
+  { id: 8, name: 'Basement Beast', hp: 45, maxHp: 45, damage: 5, room: 'Basement', color: '#1a0a0a', eyeColor: '#ff0033', killMethod: 'punch', speed: 1.6 },
+];
+
+// Place monsters in their rooms
+const monsters = monsterDefs.map(def => {
+  const room = rooms.find(r => r.name === def.room);
+  return {
+    ...def,
+    x: room.x + room.w / 2 + (def.id === 4 ? 100 : 0),
+    y: room.y + room.h - TILE - 44,
+    w: 36,
+    h: 44,
+    dir: 1,
+    frame: 0,
+    frozen: false,
+    frozenTimer: 0,
+    alive: true,
+    hitCooldown: 0,
+    flashDamage: 0,
+    respawnTimer: 0,
+  };
+});
+
+// === PLAYER ===
+const characterDefs = {
+  normal: { name: 'Normal', hp: 15, punchDmg: 1, kickDmg: 1, freezeTime: 3, spikyDmg: 0, color: '#ddaa55', cost: 0 },
+  fighter: { name: 'Fighter', hp: 15, punchDmg: 2, kickDmg: 2, freezeTime: 3, spikyDmg: 0, color: '#dd5555', cost: 5 },
+  spiky: { name: 'Spiky', hp: 15, punchDmg: 1, kickDmg: 1, freezeTime: 3, spikyDmg: 2, color: '#dddd33', cost: 5 },
+  army: { name: 'Army Guy', hp: 20, punchDmg: 1, kickDmg: 1, freezeTime: 3, spikyDmg: 0, color: '#337733', cost: 8 },
+  snow: { name: 'Snow Guy', hp: 15, punchDmg: 1, kickDmg: 1, freezeTime: 6, spikyDmg: 0, color: '#aaccff', cost: 8 },
+};
+
+const player = {
+  x: 1200,
+  y: 750,
+  vx: 0,
+  vy: 0,
+  w: PLAYER_W,
+  h: PLAYER_H,
+  dir: 1,
+  onGround: false,
+  hp: 15,
+  maxHp: 15,
+  hunger: 100,
+  maxHunger: 100,
+  coins: 0,
+  xp: 0,
+  character: 'normal',
+  inventory: { flashlight: 0, snowball: 0 },
+  attacking: false,
+  attackType: null,
+  attackTimer: 0,
+  flashlightOn: false,
+  flashlightTimer: 0,
+  invincible: 0,
+  dead: false,
+  unlockedChars: ['normal'],
+  frame: 0,
+  moveTimer: 0,
+  crouching: false,
+};
+
+// === INPUT ===
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; e.preventDefault(); });
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+// Touch controls
+function setupTouch(id, key) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('touchstart', e => { e.preventDefault(); keys[key] = true; });
+  el.addEventListener('touchend', e => { e.preventDefault(); keys[key] = false; });
+}
+setupTouch('btn-left', 'a');
+setupTouch('btn-right', 'd');
+setupTouch('btn-jump', ' ');
+setupTouch('btn-punch', '1');
+setupTouch('btn-kick', '2');
+setupTouch('btn-flash', 'shift');
+
+// === AUDIO (Web Audio API) ===
+let audioCtx;
+function initAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+
+function playSound(type) {
+  initAudio();
+  const now = audioCtx.currentTime;
+
+  if (type === 'punch') {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(150, now);
+    osc.frequency.exponentialRampToValueAtTime(50, now + 0.15);
+    gain.gain.setValueAtTime(0.3, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.15);
+  }
+  else if (type === 'kick') {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(200, now);
+    osc.frequency.exponentialRampToValueAtTime(40, now + 0.2);
+    gain.gain.setValueAtTime(0.3, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.2);
+  }
+  else if (type === 'coin') {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(800, now);
+    osc.frequency.setValueAtTime(1200, now + 0.1);
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.2);
+  }
+  else if (type === 'hurt') {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(300, now);
+    osc.frequency.exponentialRampToValueAtTime(100, now + 0.3);
+    gain.gain.setValueAtTime(0.3, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.3);
+  }
+  else if (type === 'pickup') {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(500, now);
+    osc.frequency.setValueAtTime(700, now + 0.08);
+    osc.frequency.setValueAtTime(900, now + 0.16);
+    gain.gain.setValueAtTime(0.15, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.25);
+  }
+  else if (type === 'flashlight') {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(2000, now);
+    osc.frequency.exponentialRampToValueAtTime(3000, now + 0.3);
+    gain.gain.setValueAtTime(0.15, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.4);
+  }
+  else if (type === 'freeze') {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(1500, now);
+    osc.frequency.exponentialRampToValueAtTime(200, now + 0.5);
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.5);
+  }
+  else if (type === 'death') {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(400, now);
+    osc.frequency.exponentialRampToValueAtTime(30, now + 1);
+    gain.gain.setValueAtTime(0.3, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 1);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 1);
+  }
+  else if (type === 'jumpscare') {
+    // Loud, harsh screech — classic FNAF jumpscare sound
+    for (let i = 0; i < 3; i++) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = i === 0 ? 'sawtooth' : 'square';
+      osc.frequency.setValueAtTime(800 + i * 400, now);
+      osc.frequency.linearRampToValueAtTime(200 + i * 100, now + 0.8);
+      gain.gain.setValueAtTime(0.4, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.8);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(now);
+      osc.stop(now + 0.8);
+    }
+    // Static noise burst
+    const bufferSize = audioCtx.sampleRate * 0.5;
+    const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * 0.3;
+    const noise = audioCtx.createBufferSource();
+    const noiseGain = audioCtx.createGain();
+    noise.buffer = buffer;
+    noiseGain.gain.setValueAtTime(0.3, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+    noise.connect(noiseGain).connect(audioCtx.destination);
+    noise.start(now);
+  }
+  else if (type === 'camera') {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(1000, now);
+    gain.gain.setValueAtTime(0.05, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.1);
+  }
+  else if (type === 'static') {
+    const bufferSize = audioCtx.sampleRate * 0.3;
+    const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1);
+    const noise = audioCtx.createBufferSource();
+    const noiseGain = audioCtx.createGain();
+    noise.buffer = buffer;
+    noiseGain.gain.setValueAtTime(0.08, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+    noise.connect(noiseGain).connect(audioCtx.destination);
+    noise.start(now);
+  }
+  else if (type === 'note') {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(600, now);
+    osc.frequency.setValueAtTime(800, now + 0.1);
+    gain.gain.setValueAtTime(0.1, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.3);
+  }
+}
+
+// Ambient heartbeat
+let heartbeatInterval;
+function startHeartbeat() {
+  if (heartbeatInterval) return;
+  heartbeatInterval = setInterval(() => {
+    if (!audioCtx || player.dead) return;
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(50, now);
+    gain.gain.setValueAtTime(0.15, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.15);
+    // Second beat
+    setTimeout(() => {
+      if (!audioCtx) return;
+      const now2 = audioCtx.currentTime;
+      const osc2 = audioCtx.createOscillator();
+      const gain2 = audioCtx.createGain();
+      osc2.type = 'sine';
+      osc2.frequency.setValueAtTime(45, now2);
+      gain2.gain.setValueAtTime(0.12, now2);
+      gain2.gain.exponentialRampToValueAtTime(0.01, now2 + 0.12);
+      osc2.connect(gain2).connect(audioCtx.destination);
+      osc2.start(now2);
+      osc2.stop(now2 + 0.12);
+    }, 200);
+  }, 1500);
+}
+
+// Ambient creepy drone
+let ambientStarted = false;
+function startAmbient() {
+  if (ambientStarted || !audioCtx) return;
+  ambientStarted = true;
+
+  // Low creepy hum
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(38, audioCtx.currentTime);
+  gain.gain.setValueAtTime(0.06, audioCtx.currentTime);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start();
+
+  // Second slightly detuned hum for unsettling feel
+  const osc2 = audioCtx.createOscillator();
+  const gain2 = audioCtx.createGain();
+  osc2.type = 'sine';
+  osc2.frequency.setValueAtTime(40.5, audioCtx.currentTime);
+  gain2.gain.setValueAtTime(0.04, audioCtx.currentTime);
+  osc2.connect(gain2).connect(audioCtx.destination);
+  osc2.start();
+
+  // Random creepy sounds every few seconds
+  setInterval(() => {
+    if (!audioCtx || player.dead) return;
+    if (Math.random() > 0.4) return; // only sometimes
+    const now = audioCtx.currentTime;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    const types = ['sine', 'triangle', 'sawtooth'];
+    o.type = types[Math.floor(Math.random() * 3)];
+    o.frequency.setValueAtTime(100 + Math.random() * 300, now);
+    o.frequency.exponentialRampToValueAtTime(20 + Math.random() * 80, now + 1.5);
+    g.gain.setValueAtTime(0.03, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(now);
+    o.stop(now + 1.5);
+  }, 4000);
+}
+
+// Footstep sound
+let lastFootstep = 0;
+function playFootstep() {
+  if (!audioCtx) return;
+  const now = Date.now();
+  if (now - lastFootstep < 250) return;
+  lastFootstep = now;
+  const t = audioCtx.currentTime;
+  const noise = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  noise.type = 'triangle';
+  noise.frequency.setValueAtTime(80 + Math.random() * 40, t);
+  g.gain.setValueAtTime(0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+  noise.connect(g).connect(audioCtx.destination);
+  noise.start(t);
+  noise.stop(t + 0.08);
+}
+
+// Monster growl (when near a monster)
+let lastGrowl = 0;
+function playMonsterGrowl(monster) {
+  if (!audioCtx) return;
+  const now = Date.now();
+  if (now - lastGrowl < 3000) return;
+  lastGrowl = now;
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'sawtooth';
+  o.frequency.setValueAtTime(60 + monster.id * 15, t);
+  o.frequency.exponentialRampToValueAtTime(30, t + 0.8);
+  g.gain.setValueAtTime(0.1, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.8);
+  o.connect(g).connect(audioCtx.destination);
+  o.start(t);
+  o.stop(t + 0.8);
+}
+
+// === CAMERA ===
+const camera = { x: 0, y: 0 };
+
+function updateCamera() {
+  const targetX = player.x - canvas.width / 2;
+  const targetY = player.y - canvas.height / 2 + 50;
+  camera.x += (targetX - camera.x) * 0.1;
+  camera.y += (targetY - camera.y) * 0.1;
+}
+
+// === COLLISION ===
+function rectOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function collideWithPlatforms(entity) {
+  for (const p of platforms) {
+    if (rectOverlap(entity, p)) {
+      const overlapLeft = (entity.x + entity.w) - p.x;
+      const overlapRight = (p.x + p.w) - entity.x;
+      const overlapTop = (entity.y + entity.h) - p.y;
+      const overlapBottom = (p.y + p.h) - entity.y;
+
+      const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+
+      if (minOverlap === overlapTop && entity.vy >= 0) {
+        entity.y = p.y - entity.h;
+        entity.vy = 0;
+        entity.onGround = true;
+      } else if (minOverlap === overlapBottom && entity.vy < 0) {
+        entity.y = p.y + p.h;
+        entity.vy = 0;
+      } else if (minOverlap === overlapLeft) {
+        entity.x = p.x - entity.w;
+        entity.vx = 0;
+      } else if (minOverlap === overlapRight) {
+        entity.x = p.x + p.w;
+        entity.vx = 0;
+      }
+    }
+  }
+}
+
+// === GAME STATE ===
+let gameState = 'title'; // title, instructions, playing, dead, shop, jumpscare, camera, note
+let shopSelection = 0;
+let hungerTimer = 0;
+let starvingTimer = 0;
+let discoBallAngle = 0;
+let titleFlicker = 0;
+
+// Jumpscare system
+let jumpscareMonster = null;
+let jumpscareTimer = 0;
+
+// Security camera system
+let cameraActive = false;
+let cameraRoom = 0; // which room we're viewing
+let cameraStatic = 0;
+
+// Flickering lights
+let flickerRooms = {};
+let flickerTimer = 0;
+
+// Creepy notes / VHS tapes
+const notes = [
+  { x: 150, y: 390, room: 'Sleep Place', collected: false, title: 'TORN NOTE #1',
+    text: 'Day 1: The hotel seems normal. But at\nnight I hear footsteps in the halls.\nNo one is there when I check.' },
+  { x: 1650, y: 390, room: 'Attic', collected: false, title: 'VHS TAPE #1',
+    text: 'Recording from 1987: "The toys...\nthey move when no one is watching.\nI saw it on the cameras."' },
+  { x: 700, y: 1190, room: 'Basement', collected: false, title: 'OLD DIARY',
+    text: 'They built this hotel on top of\nsomething. The basement goes deeper\nthan the blueprints show.' },
+  { x: 1250, y: 390, room: 'WC', collected: false, title: 'TORN NOTE #2',
+    text: 'Day 5: The mirrors... I swear I saw\nsomething behind me. But when I\nturned around, nothing was there.' },
+  { x: 1700, y: 790, room: 'Laundry', collected: false, title: 'VHS TAPE #2',
+    text: 'Recording from 1992: "Machine #3\nstarted on its own again. There was\nsomething INSIDE it this time."' },
+  { x: 1200, y: 1190, room: 'Pool', collected: false, title: 'WATERLOGGED NOTE',
+    text: 'The pool has been closed since the\nincident. Something lives in the\nwater now. Do NOT swim at night.' },
+  { x: 850, y: 395, room: 'Disco Room', collected: false, title: 'TORN NOTE #3',
+    text: 'Day 12: The music plays by itself\nevery night at 3 AM. The disco ball\nspins. But the room is EMPTY.' },
+  { x: 350, y: 790, room: 'Quiet Place', collected: false, title: 'FINAL NOTE',
+    text: 'If you are reading this, GET OUT.\nThe monsters were once guests.\nThe hotel... it changes people.' },
+];
+let activeNote = null;
+let collectedNotes = [];
+
+// === UPDATE ===
+function update() {
+  if (gameState === 'title') {
+    titleFlicker += 0.05;
+    if (keys[' '] || keys['enter']) {
+      gameState = 'instructions';
+      keys[' '] = false;
+      keys['enter'] = false;
+    }
+    return;
+  }
+
+  if (gameState === 'instructions') {
+    if (keys[' '] || keys['enter']) {
+      gameState = 'playing';
+      initAudio();
+      startHeartbeat();
+      startAmbient();
+      keys[' '] = false;
+      keys['enter'] = false;
+    }
+    return;
+  }
+
+  if (gameState === 'dead') {
+    if (keys[' '] || keys['enter']) {
+      resetGame();
+      gameState = 'playing';
+    }
+    return;
+  }
+
+  if (gameState === 'map') {
+    if (keys['escape'] || keys['1']) {
+      gameState = 'playing';
+      keys['escape'] = false;
+      keys['1'] = false;
+    }
+    return;
+  }
+
+  if (gameState === 'jumpscare') {
+    jumpscareTimer--;
+    if (jumpscareTimer <= 0) {
+      player.dead = true;
+      gameState = 'dead';
+    }
+    return;
+  }
+
+  if (gameState === 'camera') {
+    cameraStatic = Math.max(0, cameraStatic - 1);
+    if (keys['a'] || keys['arrowleft']) {
+      cameraRoom = (cameraRoom - 1 + rooms.length) % rooms.length;
+      cameraStatic = 8;
+      playSound('static');
+      keys['a'] = false;
+      keys['arrowleft'] = false;
+    }
+    if (keys['d'] || keys['arrowright']) {
+      cameraRoom = (cameraRoom + 1) % rooms.length;
+      cameraStatic = 8;
+      playSound('static');
+      keys['d'] = false;
+      keys['arrowright'] = false;
+    }
+    if (keys['c'] || keys['escape']) {
+      cameraActive = false;
+      gameState = 'playing';
+      keys['c'] = false;
+      keys['escape'] = false;
+    }
+    // Monsters still move while on camera!
+    monsters.forEach(m => {
+      if (!m.alive || m.frozen) return;
+      const room = rooms.find(r => r.name === m.room);
+      m.x += m.speed * m.dir;
+      if (m.x <= room.x + TILE) m.dir = 1;
+      if (m.x + m.w >= room.x + room.w - TILE) m.dir = -1;
+      m.frame += 0.05;
+    });
+    return;
+  }
+
+  if (gameState === 'note') {
+    if (keys[' '] || keys['enter'] || keys['escape']) {
+      activeNote = null;
+      gameState = 'playing';
+      keys[' '] = false;
+      keys['enter'] = false;
+      keys['escape'] = false;
+    }
+    return;
+  }
+
+  if (gameState === 'shop') {
+    updateShop();
+    return;
+  }
+
+  if (player.dead) return;
+
+  const charDef = characterDefs[player.character];
+
+  // Movement
+  let moving = false;
+  if (keys['a']) { player.vx = -3.5; player.dir = -1; moving = true; }
+  else if (keys['d']) { player.vx = 3.5; player.dir = 1; moving = true; }
+  else { player.vx *= 0.7; }
+
+  // Footstep sounds
+  if (moving && player.onGround) playFootstep();
+
+  // Crouch (S key while on ground)
+  const wasCrouching = player.crouching;
+  if (keys['s'] && player.onGround) {
+    player.crouching = true;
+    player.h = 20; // shorter when crouching
+    if (!wasCrouching) {
+      player.y += PLAYER_H - 20; // shift down so feet stay on floor
+    }
+    // Slower when crouching
+    player.vx *= 0.5;
+  } else if (player.crouching) {
+    // Stand back up
+    player.crouching = false;
+    player.h = PLAYER_H;
+    player.y -= PLAYER_H - 20; // shift back up
+  }
+
+  // Jump (can't jump while crouching)
+  if ((keys[' '] || keys['w']) && player.onGround && !player.crouching) {
+    player.vy = -11;
+    player.onGround = false;
+  }
+
+  // Gravity
+  player.vy += GRAVITY;
+  if (player.vy > 12) player.vy = 12;
+
+  // Move
+  player.x += player.vx;
+  player.y += player.vy;
+  player.onGround = false;
+
+  // Collisions
+  collideWithPlatforms(player);
+
+  // Keep in world
+  if (player.x < 0) player.x = 0;
+  if (player.x > WORLD_W - player.w) player.x = WORLD_W - player.w;
+
+  // Hunger
+  if (moving && player.onGround) {
+    hungerTimer++;
+    if (hungerTimer > 30) {
+      hungerTimer = 0;
+      player.hunger = Math.max(0, player.hunger - 0.5);
+    }
+  }
+
+  // Starving damage
+  if (player.hunger <= 0) {
+    starvingTimer++;
+    if (starvingTimer > 60) {
+      starvingTimer = 0;
+      player.hp = Math.max(0, player.hp - 0.5);
+      if (player.hp <= 0) {
+        player.dead = true;
+        jumpscareMonster = null;
+        jumpscareTimer = 60;
+        gameState = 'jumpscare';
+        playSound('jumpscare');
+      }
+    }
+  }
+
+  // Attacking
+  if (player.attackTimer > 0) {
+    player.attackTimer--;
+    if (player.attackTimer === 0) player.attacking = false;
+  }
+
+  // Map toggle (key 1)
+  if (keys['1'] && !keys._mapCooldown) {
+    keys._mapCooldown = true;
+    gameState = gameState === 'map' ? 'playing' : 'map';
+    keys['1'] = false;
+    setTimeout(() => { keys._mapCooldown = false; }, 300);
+  }
+
+  // Punch (key N)
+  if (keys['n'] && !player.attacking) {
+    player.attacking = true;
+    player.attackType = 'punch';
+    player.attackTimer = 15;
+    playSound('punch');
+    attackMonsters('punch');
+  }
+
+  // Kick (key M)
+  if (keys['m'] && !player.attacking) {
+    player.attacking = true;
+    player.attackType = 'kick';
+    player.attackTimer = 20;
+    playSound('kick');
+    attackMonsters('kick');
+  }
+
+  // Flashlight (Shift)
+  if (keys['shift'] && player.inventory.flashlight > 0) {
+    if (!player.flashlightOn) {
+      player.flashlightOn = true;
+      playSound('flashlight');
+    }
+  } else if (!keys['shift']) {
+    player.flashlightOn = false;
+  }
+
+  if (player.flashlightOn) {
+    // Damage flashlight-vulnerable monsters
+    monsters.forEach(m => {
+      if (!m.alive || m.killMethod !== 'flashlight') return;
+      const flashRange = 150;
+      const dx = m.x - player.x;
+      if (Math.sign(dx) === player.dir && Math.abs(dx) < flashRange && Math.abs(m.y - player.y) < 60) {
+        m.hp -= 0.5;
+        m.flashDamage += 0.5;
+        if (m.hp <= 0) {
+          m.alive = false;
+          player.xp += m.id * 2;
+        }
+      }
+    });
+  }
+
+  // Snowball throw (key 3)
+  if (keys['3'] && player.inventory.snowball > 0 && !keys._snowCooldown) {
+    keys._snowCooldown = true;
+    player.inventory.snowball--;
+    playSound('freeze');
+    const freezeTime = charDef.freezeTime * 60;
+    // Freeze nearest monster in facing direction
+    let nearest = null;
+    let nearDist = 200;
+    monsters.forEach(m => {
+      if (!m.alive || m.frozen) return;
+      const dx = m.x - player.x;
+      const dist = Math.abs(dx);
+      if (Math.sign(dx) === player.dir && dist < nearDist) {
+        nearest = m;
+        nearDist = dist;
+      }
+    });
+    if (nearest) {
+      nearest.frozen = true;
+      nearest.frozenTimer = freezeTime;
+    }
+    setTimeout(() => { keys._snowCooldown = false; }, 500);
+  }
+
+  // Invincibility frames
+  if (player.invincible > 0) player.invincible--;
+
+  // Respawn collected items after 45 seconds
+  items.forEach(item => {
+    if (item.collected) {
+      item._respawn = (item._respawn || 0) + 1;
+      if (item._respawn >= 2700) {
+        item.collected = false;
+        item._respawn = 0;
+      }
+    }
+  });
+
+  // Item pickup
+  items.forEach(item => {
+    if (item.collected) return;
+    const itemRect = { x: item.x - 10, y: item.y - 10, w: 20, h: 20 };
+    if (rectOverlap(player, itemRect)) {
+      item.collected = true;
+      if (item.type === 'coin') {
+        player.coins++;
+        playSound('coin');
+      } else if (item.type === 'apple') {
+        player.hunger = Math.min(player.maxHunger, player.hunger + 25);
+        playSound('pickup');
+      } else if (item.type === 'flashlight') {
+        player.inventory.flashlight++;
+        playSound('pickup');
+      } else if (item.type === 'snowball') {
+        player.inventory.snowball++;
+        playSound('pickup');
+      }
+    }
+  });
+
+  // Open shop (key E near lobby)
+  if (keys['e']) {
+    const lobby = rooms[0];
+    if (player.x > lobby.x && player.x < lobby.x + lobby.w && player.y > lobby.y && player.y < lobby.y + lobby.h) {
+      gameState = 'shop';
+      keys['e'] = false;
+    }
+  }
+
+  // Update monsters
+  monsters.forEach(m => {
+    // Respawn dead monsters after 30 seconds (1800 frames)
+    if (!m.alive) {
+      m.respawnTimer++;
+      if (m.respawnTimer >= 1800) {
+        m.alive = true;
+        m.hp = m.maxHp;
+        m.frozen = false;
+        m.frozenTimer = 0;
+        m.respawnTimer = 0;
+        m.flashDamage = 0;
+        const room = rooms.find(r => r.name === m.room);
+        m.x = room.x + room.w / 2 + (m.id === 4 ? 100 : 0);
+        m.y = room.y + room.h - TILE - 44;
+      }
+      return;
+    }
+
+    // Frozen timer
+    if (m.frozen) {
+      m.frozenTimer--;
+      if (m.frozenTimer <= 0) m.frozen = false;
+      return;
+    }
+
+    // Hit cooldown
+    if (m.hitCooldown > 0) m.hitCooldown--;
+
+    // Monster AI: patrol in room
+    const room = rooms.find(r => r.name === m.room);
+    m.x += m.speed * m.dir;
+    if (m.x <= room.x + TILE) { m.dir = 1; }
+    if (m.x + m.w >= room.x + room.w - TILE) { m.dir = -1; }
+
+    // Animation
+    m.frame += 0.05;
+
+    // Growl when player is nearby
+    const distToPlayer = Math.abs(m.x - player.x) + Math.abs(m.y - player.y);
+    if (distToPlayer < 200) playMonsterGrowl(m);
+
+    // Hit player
+    if (m.hitCooldown <= 0 && rectOverlap(player, m) && player.invincible <= 0) {
+      player.hp -= m.damage;
+      player.invincible = 60;
+      m.hitCooldown = 60;
+      playSound('hurt');
+
+      // Spiky damage
+      if (charDef.spikyDmg > 0) {
+        m.hp -= charDef.spikyDmg;
+        if (m.hp <= 0) { m.alive = false; player.xp += m.id * 2; }
+      }
+
+      if (player.hp <= 0) {
+        player.hp = 0;
+        // JUMPSCARE!
+        jumpscareMonster = m;
+        jumpscareTimer = 90; // 1.5 seconds of jumpscare
+        gameState = 'jumpscare';
+        playSound('jumpscare');
+        return;
+      }
+    }
+  });
+
+  // Flickering lights
+  flickerTimer++;
+  if (flickerTimer > 120 + Math.random() * 300) {
+    flickerTimer = 0;
+    const randomRoom = rooms[Math.floor(Math.random() * rooms.length)];
+    flickerRooms[randomRoom.name] = 30 + Math.random() * 40;
+  }
+  Object.keys(flickerRooms).forEach(name => {
+    flickerRooms[name]--;
+    if (flickerRooms[name] <= 0) delete flickerRooms[name];
+  });
+
+  // Note pickup
+  notes.forEach(note => {
+    if (note.collected) return;
+    const noteRect = { x: note.x - 12, y: note.y - 12, w: 24, h: 24 };
+    if (rectOverlap(player, noteRect)) {
+      note.collected = true;
+      collectedNotes.push(note);
+      activeNote = note;
+      gameState = 'note';
+      playSound('note');
+    }
+  });
+
+  // XP rewards — every 10 XP get a snowball
+  while (player.xp >= 10) {
+    player.xp -= 10;
+    player.inventory.snowball++;
+    playSound('pickup');
+  }
+
+  // Camera toggle (C key)
+  if (keys['c'] && !keys._camCooldown) {
+    keys._camCooldown = true;
+    cameraActive = !cameraActive;
+    gameState = cameraActive ? 'camera' : 'playing';
+    if (cameraActive) { playSound('camera'); cameraStatic = 10; }
+    setTimeout(() => { keys._camCooldown = false; }, 300);
+  }
+
+  // Animation
+  if (moving) player.frame += 0.15;
+  player.moveTimer++;
+
+  // Camera
+  updateCamera();
+
+  // Disco ball
+  discoBallAngle += 0.02;
+}
+
+function attackMonsters(type) {
+  const charDef = characterDefs[player.character];
+  const range = type === 'kick' ? 45 : 35;
+  const damage = type === 'kick' ? charDef.kickDmg : charDef.punchDmg;
+
+  monsters.forEach(m => {
+    if (!m.alive) return;
+    if (m.killMethod !== type && type !== 'kick' && type !== 'punch') return;
+
+    const dx = m.x - player.x;
+    const dy = Math.abs(m.y - player.y);
+    if (Math.sign(dx) === player.dir && Math.abs(dx) < range + m.w && dy < 50) {
+      if (m.killMethod === type || (m.killMethod === 'punch' && type === 'punch') || (m.killMethod === 'kick' && type === 'kick')) {
+        m.hp -= damage;
+        if (m.hp <= 0) {
+          m.alive = false;
+          player.xp += m.id * 2;
+        }
+      }
+    }
+  });
+}
+
+// === SHOP ===
+const shopChars = ['fighter', 'spiky', 'army', 'snow'];
+
+function updateShop() {
+  if (keys['escape'] || keys['e']) {
+    gameState = 'playing';
+    keys['escape'] = false;
+    keys['e'] = false;
+    return;
+  }
+  if (keys['w'] || keys['arrowup']) {
+    shopSelection = Math.max(0, shopSelection - 1);
+    keys['w'] = false;
+    keys['arrowup'] = false;
+  }
+  if (keys['s'] || keys['arrowdown']) {
+    shopSelection = Math.min(shopChars.length - 1, shopSelection + 1);
+    keys['s'] = false;
+    keys['arrowdown'] = false;
+  }
+  if (keys['enter'] || keys[' ']) {
+    const charKey = shopChars[shopSelection];
+    const def = characterDefs[charKey];
+    if (player.unlockedChars.includes(charKey)) {
+      // Switch to this character
+      player.character = charKey;
+      player.maxHp = def.hp;
+      player.hp = Math.min(player.hp, player.maxHp);
+    } else if (player.coins >= def.cost) {
+      // Buy character
+      player.coins -= def.cost;
+      player.unlockedChars.push(charKey);
+      player.character = charKey;
+      player.maxHp = def.hp;
+      player.hp = Math.min(player.hp, player.maxHp);
+      playSound('coin');
+    }
+    keys['enter'] = false;
+    keys[' '] = false;
+  }
+}
+
+// === DRAW ===
+function draw() {
+  ctx.fillStyle = COLORS.bg;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (gameState === 'title') {
+    drawTitle();
+    return;
+  }
+
+  if (gameState === 'instructions') {
+    drawInstructions();
+    return;
+  }
+
+  if (gameState === 'map') {
+    drawMap();
+    return;
+  }
+
+  if (gameState === 'jumpscare') {
+    drawJumpscare();
+    return;
+  }
+
+  if (gameState === 'camera') {
+    drawCamera();
+    return;
+  }
+
+  if (gameState === 'note') {
+    drawNote();
+    return;
+  }
+
+  if (gameState === 'shop') {
+    drawShop();
+    return;
+  }
+
+  ctx.save();
+  ctx.translate(-camera.x, -camera.y);
+
+  // Draw rooms
+  rooms.forEach(r => {
+    // Room background
+    ctx.fillStyle = r.color;
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+
+    // Room name
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.font = '14px monospace';
+    ctx.fillText(r.name, r.x + 20, r.y + 30);
+
+    // === FURNITURE ===
+    const floorY = r.y + r.h - TILE;
+
+    if (r.name === 'Sleep Place') {
+      // Bed 1
+      ctx.fillStyle = '#3a2020';
+      ctx.fillRect(r.x + 60, floorY - 25, 80, 25);
+      ctx.fillStyle = '#5a2020';
+      ctx.fillRect(r.x + 60, floorY - 35, 25, 10); // pillow
+      ctx.fillStyle = '#4a3030';
+      ctx.fillRect(r.x + 60, floorY - 25, 80, 5); // blanket
+      // Bed 2
+      ctx.fillStyle = '#3a2020';
+      ctx.fillRect(r.x + 300, floorY - 25, 80, 25);
+      ctx.fillStyle = '#5a2020';
+      ctx.fillRect(r.x + 300, floorY - 35, 25, 10);
+      ctx.fillStyle = '#4a3030';
+      ctx.fillRect(r.x + 300, floorY - 25, 80, 5);
+      // Nightstand
+      ctx.fillStyle = '#2a1a15';
+      ctx.fillRect(r.x + 200, floorY - 30, 25, 30);
+      ctx.fillStyle = '#ffaa22';
+      ctx.beginPath();
+      ctx.arc(r.x + 212, floorY - 35, 5, 0, Math.PI * 2); // candle
+      ctx.fill();
+      // Window (on wall)
+      ctx.fillStyle = '#0a0a30';
+      ctx.fillRect(r.x + 180, r.y + 40, 50, 40);
+      ctx.strokeStyle = '#333';
+      ctx.strokeRect(r.x + 180, r.y + 40, 50, 40);
+      ctx.strokeRect(r.x + 205, r.y + 40, 0.5, 40);
+    }
+
+    if (r.name === 'WC') {
+      // Toilet 1
+      ctx.fillStyle = '#cccccc';
+      ctx.fillRect(r.x + 60, floorY - 30, 25, 30);
+      ctx.fillStyle = '#dddddd';
+      ctx.fillRect(r.x + 55, floorY - 32, 35, 8);
+      ctx.fillStyle = '#aaaaaa';
+      ctx.fillRect(r.x + 63, floorY - 45, 20, 15); // tank
+      // Toilet 2
+      ctx.fillStyle = '#cccccc';
+      ctx.fillRect(r.x + 200, floorY - 30, 25, 30);
+      ctx.fillStyle = '#dddddd';
+      ctx.fillRect(r.x + 195, floorY - 32, 35, 8);
+      ctx.fillStyle = '#aaaaaa';
+      ctx.fillRect(r.x + 203, floorY - 45, 20, 15);
+      // Sink
+      ctx.fillStyle = '#bbbbcc';
+      ctx.fillRect(r.x + 130, floorY - 50, 30, 8);
+      ctx.fillStyle = '#888899';
+      ctx.fillRect(r.x + 140, floorY - 65, 8, 15); // faucet
+      // Mirror
+      ctx.fillStyle = '#223344';
+      ctx.fillRect(r.x + 125, r.y + 50, 40, 50);
+      ctx.strokeStyle = '#555';
+      ctx.strokeRect(r.x + 125, r.y + 50, 40, 50);
+    }
+
+    if (r.name === 'Kitchen') {
+      // Stove
+      ctx.fillStyle = '#333333';
+      ctx.fillRect(r.x + 50, floorY - 40, 60, 40);
+      ctx.fillStyle = '#222';
+      ctx.fillRect(r.x + 55, floorY - 38, 15, 15); // burner
+      ctx.fillRect(r.x + 80, floorY - 38, 15, 15);
+      ctx.fillStyle = '#ff3300';
+      ctx.globalAlpha = 0.4 + Math.sin(Date.now() / 300) * 0.2;
+      ctx.fillRect(r.x + 57, floorY - 36, 11, 11); // flame
+      ctx.globalAlpha = 1;
+      // Counter
+      ctx.fillStyle = '#2a2015';
+      ctx.fillRect(r.x + 150, floorY - 35, 100, 35);
+      ctx.fillStyle = '#3a3025';
+      ctx.fillRect(r.x + 150, floorY - 38, 100, 5);
+      // Fridge
+      ctx.fillStyle = '#444455';
+      ctx.fillRect(r.x + 350, floorY - 70, 40, 70);
+      ctx.fillStyle = '#555566';
+      ctx.fillRect(r.x + 352, floorY - 68, 36, 30);
+      ctx.fillRect(r.x + 352, floorY - 35, 36, 30);
+      ctx.fillStyle = '#888';
+      ctx.fillRect(r.x + 388, floorY - 55, 3, 8); // handle
+      ctx.fillRect(r.x + 388, floorY - 20, 3, 8);
+      // Pots hanging
+      ctx.fillStyle = '#555';
+      for (let p = 0; p < 3; p++) {
+        ctx.beginPath();
+        ctx.arc(r.x + 70 + p * 30, r.y + 50, 8, 0, Math.PI);
+        ctx.fill();
+      }
+    }
+
+    if (r.name === 'Disco Room') {
+      // Speakers
+      ctx.fillStyle = '#222';
+      ctx.fillRect(r.x + 40, floorY - 50, 30, 50);
+      ctx.fillStyle = '#333';
+      ctx.beginPath();
+      ctx.arc(r.x + 55, floorY - 30, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillRect(r.x + r.w - 70, floorY - 50, 30, 50);
+      ctx.beginPath();
+      ctx.arc(r.x + r.w - 55, floorY - 30, 10, 0, Math.PI * 2);
+      ctx.fill();
+      // Dance floor tiles (colored)
+      const tileColors = ['#330033', '#003333', '#333300', '#330000'];
+      for (let tx = 0; tx < 6; tx++) {
+        for (let ty = 0; ty < 2; ty++) {
+          ctx.fillStyle = tileColors[(tx + ty) % 4];
+          ctx.globalAlpha = 0.3;
+          ctx.fillRect(r.x + 200 + tx * 35, floorY - TILE + ty * 20 - 20, 33, 18);
+        }
+      }
+      ctx.globalAlpha = 1;
+      // DJ booth
+      ctx.fillStyle = '#1a1a2a';
+      ctx.fillRect(r.x + r.w / 2 - 40, floorY - 35, 80, 35);
+      ctx.fillStyle = '#333';
+      ctx.fillRect(r.x + r.w / 2 - 35, floorY - 33, 30, 10); // turntable
+      ctx.fillStyle = '#555';
+      ctx.beginPath();
+      ctx.arc(r.x + r.w / 2 - 20, floorY - 28, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (r.name === 'Quiet Place') {
+      // Bookshelf
+      ctx.fillStyle = '#2a1a10';
+      ctx.fillRect(r.x + 50, floorY - 70, 50, 70);
+      const bookColors = ['#aa2222', '#2222aa', '#22aa22', '#aaaa22', '#aa22aa'];
+      for (let b = 0; b < 5; b++) {
+        ctx.fillStyle = bookColors[b];
+        ctx.fillRect(r.x + 55 + b * 8, floorY - 65 + (b % 2) * 2, 6, 25);
+      }
+      for (let b = 0; b < 4; b++) {
+        ctx.fillStyle = bookColors[b + 1];
+        ctx.fillRect(r.x + 55 + b * 10, floorY - 35 + (b % 2) * 2, 7, 25);
+      }
+      // Armchair
+      ctx.fillStyle = '#3a2020';
+      ctx.fillRect(r.x + 180, floorY - 35, 40, 35);
+      ctx.fillStyle = '#4a2828';
+      ctx.fillRect(r.x + 175, floorY - 40, 10, 40); // arm
+      ctx.fillRect(r.x + 215, floorY - 40, 10, 40); // arm
+      ctx.fillRect(r.x + 180, floorY - 50, 40, 15); // back
+      // Lamp
+      ctx.fillStyle = '#555';
+      ctx.fillRect(r.x + 310, floorY - 60, 4, 60);
+      ctx.fillStyle = '#ffcc44';
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath();
+      ctx.moveTo(r.x + 298, floorY - 60);
+      ctx.lineTo(r.x + 326, floorY - 60);
+      ctx.lineTo(r.x + 318, floorY - 75);
+      ctx.lineTo(r.x + 306, floorY - 75);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      // Rug
+      ctx.fillStyle = '#3a1a1a';
+      ctx.globalAlpha = 0.4;
+      ctx.fillRect(r.x + 140, floorY - 5, 120, 5);
+      ctx.globalAlpha = 1;
+    }
+
+    if (r.name === 'Lobby') {
+      // Reception desk
+      ctx.fillStyle = '#2a1a15';
+      ctx.fillRect(r.x + 180, floorY - 40, 120, 40);
+      ctx.fillStyle = '#3a2a20';
+      ctx.fillRect(r.x + 180, floorY - 43, 120, 5);
+      // Bell on desk
+      ctx.fillStyle = '#ccaa00';
+      ctx.beginPath();
+      ctx.arc(r.x + 240, floorY - 48, 6, Math.PI, 0);
+      ctx.fill();
+      ctx.fillStyle = '#aa8800';
+      ctx.beginPath();
+      ctx.arc(r.x + 240, floorY - 54, 2, 0, Math.PI * 2);
+      ctx.fill();
+      // Couch
+      ctx.fillStyle = '#3a2222';
+      ctx.fillRect(r.x + 50, floorY - 30, 80, 30);
+      ctx.fillStyle = '#4a2828';
+      ctx.fillRect(r.x + 45, floorY - 45, 10, 45);
+      ctx.fillRect(r.x + 125, floorY - 45, 10, 45);
+      ctx.fillRect(r.x + 50, floorY - 45, 80, 15);
+      // Chandelier
+      ctx.fillStyle = '#555';
+      ctx.fillRect(r.x + 240, r.y + 20, 2, 25);
+      ctx.fillStyle = '#ccaa44';
+      for (let c = 0; c < 5; c++) {
+        ctx.beginPath();
+        ctx.arc(r.x + 225 + c * 8, r.y + 48, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // "SHOP" sign
+      ctx.fillStyle = '#cc8800';
+      ctx.font = 'bold 10px monospace';
+      ctx.fillText('SHOP [E]', r.x + 200, floorY - 50);
+    }
+
+    if (r.name === 'Attic') {
+      // Old dusty boxes
+      ctx.fillStyle = '#3a2a15';
+      ctx.fillRect(r.x + 50, floorY - 30, 35, 30);
+      ctx.fillRect(r.x + 90, floorY - 25, 30, 25);
+      ctx.fillRect(r.x + 50, floorY - 55, 30, 25);
+      // Cobwebs in corners
+      ctx.strokeStyle = 'rgba(200,200,200,0.2)';
+      ctx.beginPath();
+      ctx.moveTo(r.x + 20, r.y + 20);
+      ctx.lineTo(r.x + 80, r.y + 20);
+      ctx.lineTo(r.x + 20, r.y + 70);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(r.x + r.w - 20, r.y + 20);
+      ctx.lineTo(r.x + r.w - 80, r.y + 20);
+      ctx.lineTo(r.x + r.w - 20, r.y + 70);
+      ctx.closePath();
+      ctx.stroke();
+      // Old rocking chair
+      ctx.fillStyle = '#2a1a0a';
+      ctx.fillRect(r.x + 250, floorY - 35, 35, 35);
+      ctx.fillRect(r.x + 247, floorY - 45, 5, 45);
+      ctx.fillRect(r.x + 283, floorY - 45, 5, 45);
+      // Dusty window
+      ctx.fillStyle = '#0a0a15';
+      ctx.globalAlpha = 0.5;
+      ctx.fillRect(r.x + 350, r.y + 50, 40, 35);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = '#222';
+      ctx.strokeRect(r.x + 350, r.y + 50, 40, 35);
+    }
+
+    if (r.name === 'Laundry') {
+      // Washing machines
+      ctx.fillStyle = '#555566';
+      ctx.fillRect(r.x + 50, floorY - 45, 40, 45);
+      ctx.fillRect(r.x + 100, floorY - 45, 40, 45);
+      ctx.fillRect(r.x + 150, floorY - 45, 40, 45);
+      // Doors on machines
+      ctx.strokeStyle = '#777';
+      ctx.beginPath(); ctx.arc(r.x + 70, floorY - 22, 12, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(r.x + 120, floorY - 22, 12, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(r.x + 170, floorY - 22, 12, 0, Math.PI * 2); ctx.stroke();
+      // Spinning animation on middle machine
+      ctx.save();
+      ctx.translate(r.x + 120, floorY - 22);
+      ctx.rotate(Date.now() / 200);
+      ctx.fillStyle = '#8888aa';
+      ctx.fillRect(-8, -1, 16, 2);
+      ctx.fillRect(-1, -8, 2, 16);
+      ctx.restore();
+      // Clothesline
+      ctx.strokeStyle = '#666';
+      ctx.beginPath();
+      ctx.moveTo(r.x + 250, r.y + 60);
+      ctx.lineTo(r.x + 400, r.y + 60);
+      ctx.stroke();
+      // Hanging clothes
+      const clothColors = ['#aa3333', '#3333aa', '#33aa33'];
+      for (let c = 0; c < 3; c++) {
+        ctx.fillStyle = clothColors[c];
+        ctx.fillRect(r.x + 270 + c * 45, r.y + 62, 20, 30);
+      }
+      // Ironing board
+      ctx.fillStyle = '#888';
+      ctx.fillRect(r.x + 300, floorY - 35, 60, 5);
+      ctx.fillStyle = '#666';
+      ctx.fillRect(r.x + 320, floorY - 30, 4, 30);
+      ctx.fillRect(r.x + 345, floorY - 30, 4, 30);
+    }
+
+    if (r.name === 'Basement') {
+      // Pipes on ceiling
+      ctx.fillStyle = '#444';
+      ctx.fillRect(r.x + 30, r.y + 25, r.w - 60, 6);
+      ctx.fillRect(r.x + 30, r.y + 45, r.w - 100, 6);
+      // Dripping water
+      ctx.fillStyle = '#3355aa';
+      const dripY = r.y + 51 + ((Date.now() / 10) % 50);
+      ctx.fillRect(r.x + 200, dripY, 2, 4);
+      // Crates
+      ctx.fillStyle = '#2a1a0a';
+      ctx.fillRect(r.x + 60, floorY - 40, 45, 40);
+      ctx.fillRect(r.x + 110, floorY - 35, 40, 35);
+      ctx.fillRect(r.x + 60, floorY - 70, 40, 30);
+      // Barrel
+      ctx.fillStyle = '#3a2a15';
+      ctx.beginPath();
+      ctx.ellipse(r.x + 350, floorY - 25, 20, 25, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#555';
+      ctx.beginPath();
+      ctx.ellipse(r.x + 350, floorY - 25, 20, 25, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      // Chains on wall
+      ctx.strokeStyle = '#555';
+      ctx.beginPath();
+      ctx.moveTo(r.x + r.w - 60, r.y + 40);
+      ctx.lineTo(r.x + r.w - 60, r.y + 120);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(r.x + r.w - 40, r.y + 50);
+      ctx.lineTo(r.x + r.w - 40, r.y + 100);
+      ctx.stroke();
+      // Rat eyes (tiny red dots)
+      ctx.fillStyle = '#ff0000';
+      ctx.globalAlpha = 0.5 + Math.sin(Date.now() / 700) * 0.3;
+      ctx.beginPath(); ctx.arc(r.x + 420, floorY - 5, 2, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(r.x + 426, floorY - 5, 2, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    if (r.name === 'Pool') {
+      // Pool water
+      ctx.fillStyle = '#0a2040';
+      ctx.globalAlpha = 0.7;
+      ctx.fillRect(r.x + 80, floorY - 15, 300, 15);
+      // Water shimmer
+      ctx.fillStyle = '#1a4070';
+      ctx.globalAlpha = 0.3 + Math.sin(Date.now() / 500) * 0.15;
+      ctx.fillRect(r.x + 80, floorY - 15, 300, 5);
+      ctx.globalAlpha = 1;
+      // Pool edge
+      ctx.fillStyle = '#556';
+      ctx.fillRect(r.x + 75, floorY - 18, 310, 4);
+      // Diving board
+      ctx.fillStyle = '#666';
+      ctx.fillRect(r.x + 370, floorY - 40, 50, 6);
+      ctx.fillRect(r.x + 370, floorY - 40, 6, 40);
+      // Lounge chair
+      ctx.fillStyle = '#555';
+      ctx.fillRect(r.x + 50, floorY - 15, 25, 15);
+      ctx.fillStyle = '#666';
+      ctx.fillRect(r.x + 42, floorY - 25, 8, 25);
+      // Towel rack
+      ctx.fillStyle = '#444';
+      ctx.fillRect(r.x + r.w - 70, r.y + 60, 4, 50);
+      ctx.fillStyle = '#aa4444';
+      ctx.fillRect(r.x + r.w - 80, r.y + 70, 20, 15);
+      ctx.fillStyle = '#4444aa';
+      ctx.fillRect(r.x + r.w - 80, r.y + 90, 20, 15);
+    }
+  });
+
+  // Draw platforms
+  platforms.forEach(p => {
+    ctx.fillStyle = p.color || COLORS.wall;
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    // Brick pattern on walls
+    if (p.h > TILE) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+      for (let ty = p.y; ty < p.y + p.h; ty += 12) {
+        ctx.beginPath();
+        ctx.moveTo(p.x, ty);
+        ctx.lineTo(p.x + p.w, ty);
+        ctx.stroke();
+      }
+    }
+  });
+
+  // Draw door openings (visual markers)
+  doors.forEach(d => {
+    ctx.fillStyle = 'rgba(80,60,40,0.3)';
+    ctx.fillRect(d.x, d.y, d.w, d.h);
+  });
+
+  // Draw disco ball in disco room
+  const discoRoom = rooms[1];
+  const dbx = discoRoom.x + discoRoom.w / 2;
+  const dby = discoRoom.y + 40;
+  ctx.fillStyle = '#888';
+  ctx.beginPath();
+  ctx.arc(dbx, dby, 15, 0, Math.PI * 2);
+  ctx.fill();
+  // Disco reflections
+  for (let i = 0; i < 8; i++) {
+    const angle = discoBallAngle + (i * Math.PI / 4);
+    const rx = dbx + Math.cos(angle) * 150;
+    const ry = dby + Math.sin(angle) * 100;
+    const colors = ['#ff00ff', '#00ffff', '#ffff00', '#ff0066'];
+    ctx.fillStyle = colors[i % 4];
+    ctx.globalAlpha = 0.15 + Math.sin(discoBallAngle * 3 + i) * 0.1;
+    ctx.beginPath();
+    ctx.arc(rx, ry, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Draw items
+  items.forEach(item => {
+    if (item.collected) return;
+    const ix = item.x;
+    const iy = item.y + Math.sin(Date.now() / 500 + item.x) * 3;
+
+    if (item.type === 'coin') {
+      ctx.fillStyle = COLORS.coin;
+      ctx.beginPath();
+      ctx.arc(ix, iy, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#aa8800';
+      ctx.font = '10px monospace';
+      ctx.fillText('$', ix - 3, iy + 4);
+    } else if (item.type === 'apple') {
+      ctx.fillStyle = COLORS.apple;
+      ctx.beginPath();
+      ctx.arc(ix, iy, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = COLORS.appleLeaf;
+      ctx.fillRect(ix - 1, iy - 10, 3, 5);
+    } else if (item.type === 'flashlight') {
+      ctx.fillStyle = COLORS.flashlight;
+      ctx.fillRect(ix - 4, iy - 8, 8, 16);
+      ctx.fillStyle = '#cccc44';
+      ctx.fillRect(ix - 3, iy - 6, 6, 6);
+    } else if (item.type === 'snowball') {
+      ctx.fillStyle = COLORS.snowball;
+      ctx.beginPath();
+      ctx.arc(ix, iy, 7, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+
+  // Draw notes (collectible VHS tapes / papers)
+  notes.forEach(note => {
+    if (note.collected) return;
+    const nx = note.x;
+    const ny = note.y + Math.sin(Date.now() / 400 + note.x) * 2;
+    // Glowing paper
+    ctx.fillStyle = '#ffeecc';
+    ctx.shadowColor = '#ffaa00';
+    ctx.shadowBlur = 8;
+    ctx.fillRect(nx - 8, ny - 10, 16, 20);
+    ctx.shadowBlur = 0;
+    // Lines on paper
+    ctx.fillStyle = '#aa8855';
+    for (let l = 0; l < 3; l++) {
+      ctx.fillRect(nx - 5, ny - 6 + l * 6, 10, 1);
+    }
+    // "?" mark
+    ctx.fillStyle = '#cc4400';
+    ctx.font = 'bold 8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('?', nx, ny - 12);
+    ctx.textAlign = 'left';
+  });
+
+  // Flickering lights overlay per room
+  rooms.forEach(r => {
+    if (flickerRooms[r.name] !== undefined) {
+      const flickerIntensity = Math.sin(flickerRooms[r.name] * 0.8) > 0 ? 0.6 : 0.1;
+      ctx.fillStyle = `rgba(0,0,0,${flickerIntensity})`;
+      ctx.fillRect(r.x, r.y, r.w, r.h);
+    }
+  });
+
+  // Draw monsters
+  monsters.forEach(m => {
+    if (!m.alive) return;
+
+    ctx.save();
+
+    // Frozen effect
+    if (m.frozen) {
+      ctx.globalAlpha = 0.6;
+      ctx.fillStyle = '#aaddff';
+      ctx.fillRect(m.x - 2, m.y - 2, m.w + 4, m.h + 4);
+    }
+
+    // Monster body
+    ctx.fillStyle = m.color;
+    ctx.fillRect(m.x, m.y, m.w, m.h);
+
+    // Monster eyes (creepy, glowing)
+    const eyeY = m.y + 10;
+    const eyeSize = 5;
+    const eyeOffset = Math.sin(m.frame) * 2;
+    ctx.fillStyle = m.eyeColor;
+    ctx.shadowColor = m.eyeColor;
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.arc(m.x + 10 + eyeOffset, eyeY, eyeSize, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(m.x + 26 + eyeOffset, eyeY, eyeSize, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Monster mouth
+    ctx.fillStyle = '#220000';
+    ctx.fillRect(m.x + 8, m.y + 25, 20, 8);
+    // Teeth
+    ctx.fillStyle = '#ffffff';
+    for (let t = 0; t < 4; t++) {
+      ctx.fillRect(m.x + 10 + t * 5, m.y + 25, 3, 4);
+    }
+
+    // Monster name
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.shadowColor = '#000';
+    ctx.shadowBlur = 4;
+    ctx.fillText(m.name, m.x + m.w / 2, m.y - 18);
+    ctx.shadowBlur = 0;
+    ctx.textAlign = 'left';
+
+    // HP bar
+    ctx.fillStyle = '#333';
+    ctx.fillRect(m.x - 5, m.y - 10, m.w + 10, 5);
+    ctx.fillStyle = '#cc2222';
+    ctx.fillRect(m.x - 5, m.y - 10, (m.w + 10) * (m.hp / m.maxHp), 5);
+
+    ctx.restore();
+  });
+
+  // Draw player
+  drawPlayer();
+
+  // Flashlight cone
+  if (player.flashlightOn) {
+    ctx.save();
+    const fx = player.x + player.w / 2;
+    const fy = player.y + 10;
+    const coneLen = 150;
+    const coneAngle = 0.4;
+    const dir = player.dir;
+
+    const gradient = ctx.createRadialGradient(fx, fy, 0, fx + dir * coneLen, fy, coneLen);
+    gradient.addColorStop(0, 'rgba(255,255,200,0.4)');
+    gradient.addColorStop(1, 'rgba(255,255,200,0)');
+
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.moveTo(fx, fy);
+    ctx.lineTo(fx + dir * coneLen, fy - coneLen * coneAngle);
+    ctx.lineTo(fx + dir * coneLen, fy + coneLen * coneAngle);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Darkness overlay (limited visibility)
+  drawDarkness();
+
+  ctx.restore();
+
+  // HUD
+  drawHUD();
+
+  // Death screen
+  if (gameState === 'dead') {
+    drawDeathScreen();
+  }
+}
+
+function drawPlayer() {
+  const charDef = characterDefs[player.character];
+  const px = player.x;
+  const py = player.y;
+
+  // Flash when invincible
+  if (player.invincible > 0 && Math.floor(player.invincible / 4) % 2 === 0) return;
+
+  ctx.save();
+
+  if (player.crouching) {
+    // CROUCHING POSE — squished down
+    // Body (wider, shorter)
+    ctx.fillStyle = charDef.color;
+    ctx.fillRect(px + 2, py + 4, 20, 10);
+
+    // Head (lower)
+    ctx.fillStyle = charDef.color;
+    ctx.beginPath();
+    ctx.arc(px + 12, py + 4, 7, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(px + 8, py + 1, 3, 3);
+    ctx.fillRect(px + 14, py + 1, 3, 3);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(px + 9 + (player.dir > 0 ? 1 : 0), py + 2, 2, 2);
+    ctx.fillRect(px + 15 + (player.dir > 0 ? 1 : 0), py + 2, 2, 2);
+
+    // Legs (bent)
+    ctx.fillStyle = '#555';
+    ctx.fillRect(px + 4, py + 14, 7, 5);
+    ctx.fillRect(px + 13, py + 14, 7, 5);
+  } else {
+  // STANDING POSE
+  // Body
+  ctx.fillStyle = charDef.color;
+  ctx.fillRect(px + 4, py + 10, 16, 16);
+
+  // Head
+  ctx.fillStyle = charDef.color;
+  ctx.beginPath();
+  ctx.arc(px + 12, py + 8, 8, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(px + 8, py + 5, 4, 4);
+  ctx.fillRect(px + 14, py + 5, 4, 4);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(px + 9 + (player.dir > 0 ? 1 : 0), py + 6, 2, 2);
+  ctx.fillRect(px + 15 + (player.dir > 0 ? 1 : 0), py + 6, 2, 2);
+
+  // Mouth
+  ctx.fillStyle = '#000';
+  ctx.fillRect(px + 10, py + 12, 4, 2);
+
+  // Legs
+  const legOffset = Math.sin(player.frame * 2) * 3;
+  ctx.fillStyle = '#555';
+  ctx.fillRect(px + 6, py + 26, 5, 10);
+  ctx.fillRect(px + 13, py + 26, 5, 10);
+
+  // Character-specific details
+  if (player.character === 'fighter') {
+    // Headband
+    ctx.fillStyle = '#ff0000';
+    ctx.fillRect(px + 4, py + 3, 16, 3);
+  } else if (player.character === 'spiky') {
+    // Spikes
+    ctx.fillStyle = '#ffff00';
+    for (let s = 0; s < 3; s++) {
+      ctx.beginPath();
+      ctx.moveTo(px + 6 + s * 5, py);
+      ctx.lineTo(px + 8 + s * 5, py - 6);
+      ctx.lineTo(px + 10 + s * 5, py);
+      ctx.fill();
+    }
+  } else if (player.character === 'army') {
+    // Helmet
+    ctx.fillStyle = '#336633';
+    ctx.beginPath();
+    ctx.arc(px + 12, py + 5, 10, Math.PI, 0);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(px + 9, py - 2, 6, 3);
+  } else if (player.character === 'snow') {
+    // Snow hat
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(px + 12, py - 2, 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Attack animation
+  if (player.attacking) {
+    ctx.fillStyle = '#ffaa00';
+    if (player.attackType === 'punch') {
+      ctx.fillRect(px + (player.dir > 0 ? 20 : -12), py + (player.crouching ? 6 : 14), 12, 6);
+    } else {
+      ctx.fillRect(px + (player.dir > 0 ? 18 : -14), py + (player.crouching ? 14 : 28), 14, 5);
+    }
+  }
+
+  } // end of standing pose else block
+
+  ctx.restore();
+}
+
+function drawDarkness() {
+  // Create darkness with a light circle around player
+  const px = player.x + player.w / 2;
+  const py = player.y + player.h / 2;
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply';
+
+  const gradient = ctx.createRadialGradient(px, py, 30, px, py, player.flashlightOn ? 250 : 140);
+  gradient.addColorStop(0, 'rgba(40,30,50,0.3)');
+  gradient.addColorStop(1, 'rgba(5,0,10,0.85)');
+
+  ctx.fillStyle = gradient;
+  ctx.fillRect(camera.x, camera.y, canvas.width, canvas.height);
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  const pad = 15;
+  const barW = 120;
+  const barH = 14;
+
+  // HP bar
+  ctx.fillStyle = '#333';
+  ctx.fillRect(pad, pad, barW, barH);
+  ctx.fillStyle = COLORS.hpBar;
+  ctx.fillRect(pad, pad, barW * (player.hp / player.maxHp), barH);
+  ctx.strokeStyle = '#666';
+  ctx.strokeRect(pad, pad, barW, barH);
+  ctx.fillStyle = COLORS.text;
+  ctx.font = '11px monospace';
+  ctx.fillText('HP: ' + Math.ceil(player.hp) + '/' + player.maxHp, pad + 4, pad + 11);
+
+  // Hunger bar
+  ctx.fillStyle = '#333';
+  ctx.fillRect(pad, pad + 20, barW, barH);
+  ctx.fillStyle = player.hunger > 20 ? COLORS.hungerBar : '#cc2222';
+  ctx.fillRect(pad, pad + 20, barW * (player.hunger / player.maxHunger), barH);
+  ctx.strokeStyle = '#666';
+  ctx.strokeRect(pad, pad + 20, barW, barH);
+  ctx.fillStyle = COLORS.text;
+  ctx.fillText('HUNGER: ' + Math.ceil(player.hunger), pad + 4, pad + 31);
+
+  // Coins
+  ctx.fillStyle = COLORS.coin;
+  ctx.beginPath();
+  ctx.arc(pad + 8, pad + 52, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = COLORS.text;
+  ctx.font = '14px monospace';
+  ctx.fillText('x ' + player.coins, pad + 20, pad + 56);
+
+  // Character name
+  ctx.fillStyle = COLORS.text;
+  ctx.font = '12px monospace';
+  const charDef = characterDefs[player.character];
+  ctx.fillText(charDef.name, pad, pad + 56);
+
+  // XP bar
+  ctx.fillStyle = '#333';
+  ctx.fillRect(pad, pad + 62, 120, 10);
+  ctx.fillStyle = '#8844ff';
+  ctx.fillRect(pad, pad + 62, 120 * (player.xp / 10), 10);
+  ctx.strokeStyle = '#666';
+  ctx.strokeRect(pad, pad + 62, 120, 10);
+  ctx.fillStyle = '#ccaaff';
+  ctx.font = '9px monospace';
+  ctx.fillText('XP: ' + player.xp + '/10 → Snowball', pad + 4, pad + 70);
+
+  // Notes found
+  ctx.fillStyle = '#ffcc88';
+  ctx.font = '10px monospace';
+  ctx.fillText('Notes: ' + collectedNotes.length + '/' + notes.length, pad, pad + 84);
+
+  // === INVENTORY SLOTS (bottom center) ===
+  const slotSize = 50;
+  const slotGap = 6;
+  const slotCount = 6;
+  const totalW = slotCount * slotSize + (slotCount - 1) * slotGap;
+  const invX = (canvas.width - totalW) / 2;
+  const invY = canvas.height - slotSize - 15;
+
+  for (let i = 0; i < slotCount; i++) {
+    const sx = invX + i * (slotSize + slotGap);
+    const sy = invY;
+
+    // Slot background
+    ctx.fillStyle = 'rgba(20,15,30,0.8)';
+    ctx.fillRect(sx, sy, slotSize, slotSize);
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.strokeRect(sx, sy, slotSize, slotSize);
+
+    // Slot contents
+    const cx = sx + slotSize / 2;
+    const cy = sy + slotSize / 2;
+
+    if (i === 0) {
+      // Flashlight slot
+      ctx.fillStyle = player.flashlightOn ? '#ffff99' : COLORS.flashlight;
+      ctx.fillRect(cx - 4, cy - 10, 8, 20);
+      ctx.fillStyle = '#cccc44';
+      ctx.fillRect(cx - 3, cy - 8, 6, 8);
+      // Count
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 12px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(player.inventory.flashlight, sx + slotSize - 4, sy + slotSize - 4);
+      // Key hint
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('Shift', cx, sy - 3);
+      // Active glow
+      if (player.flashlightOn) {
+        ctx.strokeStyle = '#ffff66';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(sx - 1, sy - 1, slotSize + 2, slotSize + 2);
+        ctx.lineWidth = 1;
+      }
+    } else if (i === 1) {
+      // Snowball slot
+      ctx.fillStyle = COLORS.snowball;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.beginPath();
+      ctx.arc(cx - 3, cy - 3, 3, 0, Math.PI * 2);
+      ctx.fill();
+      // Count
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 12px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(player.inventory.snowball, sx + slotSize - 4, sy + slotSize - 4);
+      // Key hint
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('3', cx, sy - 3);
+    } else if (i === 2) {
+      // Punch slot
+      ctx.fillStyle = '#ffaa44';
+      ctx.font = '20px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('👊', cx, cy + 6);
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.font = '9px monospace';
+      ctx.fillText('N', cx, sy - 3);
+      if (player.attacking && player.attackType === 'punch') {
+        ctx.strokeStyle = '#ffaa44';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(sx - 1, sy - 1, slotSize + 2, slotSize + 2);
+        ctx.lineWidth = 1;
+      }
+    } else if (i === 3) {
+      // Kick slot
+      ctx.fillStyle = '#ff6644';
+      ctx.font = '20px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('🦶', cx, cy + 6);
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.font = '9px monospace';
+      ctx.fillText('M', cx, sy - 3);
+      if (player.attacking && player.attackType === 'kick') {
+        ctx.strokeStyle = '#ff6644';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(sx - 1, sy - 1, slotSize + 2, slotSize + 2);
+        ctx.lineWidth = 1;
+      }
+    } else if (i === 4) {
+      // Coins display
+      ctx.fillStyle = COLORS.coin;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#aa8800';
+      ctx.font = 'bold 14px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('$', cx, cy + 5);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 12px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(player.coins, sx + slotSize - 4, sy + slotSize - 4);
+    } else if (i === 5) {
+      // Map slot
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.font = '14px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('MAP', cx, cy + 4);
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.font = '9px monospace';
+      ctx.fillText('1', cx, sy - 3);
+    }
+  }
+  ctx.textAlign = 'left';
+}
+
+function drawTitle() {
+  ctx.fillStyle = '#050008';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Flickering title
+  const flicker = Math.sin(titleFlicker * 3) > 0.3 ? 1 : 0.6;
+  ctx.globalAlpha = flicker;
+  ctx.fillStyle = '#cc0000';
+  ctx.font = 'bold 48px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('MONSTER GAME', canvas.width / 2, canvas.height / 2 - 40);
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#666';
+  ctx.font = '16px monospace';
+  ctx.fillText('Press SPACE to start', canvas.width / 2, canvas.height / 2 + 30);
+  ctx.fillText('A scary hotel awaits...', canvas.width / 2, canvas.height / 2 + 60);
+  ctx.textAlign = 'left';
+
+  // Creepy eyes in background
+  for (let i = 0; i < 6; i++) {
+    const ex = (Math.sin(titleFlicker + i * 1.5) * 0.5 + 0.5) * canvas.width;
+    const ey = (Math.cos(titleFlicker * 0.7 + i * 2) * 0.5 + 0.5) * canvas.height;
+    ctx.fillStyle = '#ff0000';
+    ctx.globalAlpha = Math.sin(titleFlicker + i) * 0.15 + 0.1;
+    ctx.beginPath();
+    ctx.arc(ex, ey, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(ex + 15, ey, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawInstructions() {
+  ctx.fillStyle = '#050008';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const cx = canvas.width / 2;
+  let y = 40;
+
+  ctx.fillStyle = '#cc0000';
+  ctx.font = 'bold 28px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('HOW TO PLAY', cx, y);
+
+  y += 40;
+  ctx.font = '14px monospace';
+
+  // Controls section
+  ctx.fillStyle = '#ff6644';
+  ctx.fillText('--- CONTROLS ---', cx, y); y += 25;
+  ctx.fillStyle = '#ccc';
+  ctx.fillText('A / D  -  Move left / right', cx, y); y += 20;
+  ctx.fillText('W / Space  -  Jump', cx, y); y += 20;
+  ctx.fillText('S  -  Crouch (dodge attacks!)', cx, y); y += 20;
+  ctx.fillText('N  -  Punch', cx, y); y += 20;
+  ctx.fillText('M  -  Kick', cx, y); y += 20;
+  ctx.fillText('Shift  -  Flashlight (hold)', cx, y); y += 20;
+  ctx.fillText('3  -  Throw snowball', cx, y); y += 20;
+  ctx.fillText('1  -  Open map', cx, y); y += 20;
+  ctx.fillText('C  -  Security cameras (FNAF style!)', cx, y); y += 20;
+  ctx.fillText('E  -  Open shop (in Lobby)', cx, y); y += 35;
+
+  // Items section
+  ctx.fillStyle = '#ff6644';
+  ctx.fillText('--- ITEMS ---', cx, y); y += 25;
+  ctx.fillStyle = COLORS.flashlight;
+  ctx.fillText('Flashlight  -  Shines a light cone, kills some monsters', cx, y); y += 20;
+  ctx.fillStyle = COLORS.snowball;
+  ctx.fillText('Snowball  -  Freezes a monster for 3 seconds', cx, y); y += 20;
+  ctx.fillStyle = COLORS.apple;
+  ctx.fillText('Apple  -  Restores hunger', cx, y); y += 20;
+  ctx.fillStyle = COLORS.coin;
+  ctx.fillText('Scary Coin  -  Collect to buy characters', cx, y); y += 35;
+
+  // Monsters section
+  ctx.fillStyle = '#ff6644';
+  ctx.fillText('--- MONSTERS ---', cx, y); y += 25;
+  ctx.fillStyle = '#ccc';
+  ctx.fillText('#1 Shadow Creep (Sleep Place) - Kill with flashlight', cx, y); y += 20;
+  ctx.fillText('#2 Toilet Terror (WC) - Kill with flashlight', cx, y); y += 20;
+  ctx.fillText('#3 Kitchen Nightmare (Kitchen) - Kill with kicks', cx, y); y += 20;
+  ctx.fillText('#4 The Chef (Kitchen) - Kill with punches', cx, y); y += 20;
+  ctx.fillText('#5 The Cobweb (Attic) - Kill with flashlight', cx, y); y += 20;
+  ctx.fillText('#6 Washing Machine (Laundry) - Kill with kicks', cx, y); y += 20;
+  ctx.fillText('#7 The Drowner (Pool) - Kill with punches', cx, y); y += 20;
+  ctx.fillText('#8 Basement Beast (Basement) - THE HARDEST!', cx, y); y += 35;
+
+  // Tips
+  ctx.fillStyle = '#ff6644';
+  ctx.fillText('--- TIPS ---', cx, y); y += 25;
+  ctx.fillStyle = '#888';
+  ctx.fillText('Your hunger goes down as you move. Eat apples!', cx, y); y += 20;
+  ctx.fillText('If hunger reaches 0, you slowly lose HP.', cx, y); y += 20;
+  ctx.fillText('Collect coins to buy new characters in the shop.', cx, y); y += 20;
+  ctx.fillText('Find creepy NOTES to learn the hotel\'s dark story!', cx, y); y += 20;
+  ctx.fillText('Use CAMERAS [C] to spy on monsters like in FNAF!', cx, y); y += 20;
+  ctx.fillText('Watch out — lights FLICKER randomly!', cx, y); y += 35;
+
+  // Continue
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('Press SPACE to play!', cx, y);
+
+  ctx.textAlign = 'left';
+}
+
+function drawMap() {
+  ctx.fillStyle = 'rgba(5,0,10,0.92)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = '#cc0000';
+  ctx.font = 'bold 24px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('MAP', canvas.width / 2, 35);
+
+  // Draw minimap of all rooms
+  const mapScale = 0.25;
+  const offsetX = canvas.width / 2 - (WORLD_W * mapScale) / 2;
+  const offsetY = 60;
+
+  rooms.forEach(r => {
+    const rx = offsetX + r.x * mapScale;
+    const ry = offsetY + r.y * mapScale;
+    const rw = r.w * mapScale;
+    const rh = r.h * mapScale;
+
+    // Room fill
+    ctx.fillStyle = r.color;
+    ctx.fillRect(rx, ry, rw, rh);
+    ctx.strokeStyle = '#555';
+    ctx.strokeRect(rx, ry, rw, rh);
+
+    // Room name
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(r.name, rx + rw / 2, ry + rh / 2 - 8);
+
+    // Show monsters in this room
+    const roomMonsters = monsters.filter(m => m.room === r.name && m.alive);
+    if (roomMonsters.length > 0) {
+      ctx.fillStyle = '#ff4444';
+      ctx.font = '10px monospace';
+      roomMonsters.forEach((m, i) => {
+        ctx.fillText(m.name, rx + rw / 2, ry + rh / 2 + 8 + i * 14);
+      });
+    }
+
+    // Show items in this room
+    const roomItems = items.filter(item => !item.collected && item.x >= r.x && item.x <= r.x + r.w && item.y >= r.y && item.y <= r.y + r.h);
+    if (roomItems.length > 0) {
+      let ix = rx + 5;
+      let iy = ry + rh - 12;
+      roomItems.forEach(item => {
+        if (item.type === 'coin') ctx.fillStyle = COLORS.coin;
+        else if (item.type === 'apple') ctx.fillStyle = COLORS.apple;
+        else if (item.type === 'flashlight') ctx.fillStyle = COLORS.flashlight;
+        else if (item.type === 'snowball') ctx.fillStyle = COLORS.snowball;
+        ctx.beginPath();
+        ctx.arc(ix, iy, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ix += 9;
+      });
+    }
+  });
+
+  // Draw door connections
+  doors.forEach(d => {
+    const dx = offsetX + d.x * mapScale;
+    const dy = offsetY + d.y * mapScale;
+    ctx.fillStyle = '#886633';
+    ctx.fillRect(dx, dy, d.w * mapScale, d.h * mapScale);
+  });
+
+  // Draw player position on map
+  const px = offsetX + player.x * mapScale;
+  const py = offsetY + player.y * mapScale;
+  ctx.fillStyle = '#33ff33';
+  ctx.beginPath();
+  ctx.arc(px, py, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#33ff33';
+  ctx.font = '10px monospace';
+  ctx.fillText('YOU', px, py - 8);
+
+  // Legend
+  const legY = offsetY + WORLD_H * mapScale + 30;
+  ctx.textAlign = 'left';
+  ctx.font = '12px monospace';
+  ctx.fillStyle = '#33ff33'; ctx.fillText('● You', canvas.width / 2 - 150, legY);
+  ctx.fillStyle = '#ff4444'; ctx.fillText('● Monster', canvas.width / 2 - 50, legY);
+  ctx.fillStyle = COLORS.coin; ctx.fillText('● Coin', canvas.width / 2 + 50, legY);
+  ctx.fillStyle = COLORS.apple; ctx.fillText('● Apple', canvas.width / 2 - 150, legY + 18);
+  ctx.fillStyle = COLORS.flashlight; ctx.fillText('● Flashlight', canvas.width / 2 - 50, legY + 18);
+  ctx.fillStyle = COLORS.snowball; ctx.fillText('● Snowball', canvas.width / 2 + 50, legY + 18);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#666';
+  ctx.font = '12px monospace';
+  ctx.fillText('Press 1 or ESC to close', canvas.width / 2, legY + 45);
+  ctx.textAlign = 'left';
+}
+
+function drawJumpscare() {
+  // Full screen scary face!
+  const shake = (Math.random() - 0.5) * 20;
+  ctx.save();
+  ctx.translate(shake, shake * 0.5);
+
+  // Red/black flashing background
+  ctx.fillStyle = jumpscareTimer % 4 < 2 ? '#220000' : '#000000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+
+  if (jumpscareMonster) {
+    // Giant monster face filling the screen
+    const faceW = canvas.width * 0.7;
+    const faceH = canvas.height * 0.8;
+
+    // Face shape
+    ctx.fillStyle = jumpscareMonster.color;
+    ctx.fillRect(cx - faceW/2, cy - faceH/2, faceW, faceH);
+
+    // Huge glowing eyes
+    const eyeSize = faceW * 0.15;
+    ctx.fillStyle = jumpscareMonster.eyeColor;
+    ctx.shadowColor = jumpscareMonster.eyeColor;
+    ctx.shadowBlur = 40;
+    ctx.beginPath();
+    ctx.arc(cx - faceW * 0.2, cy - faceH * 0.1, eyeSize, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + faceW * 0.2, cy - faceH * 0.1, eyeSize, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Pupils (following you)
+    ctx.fillStyle = '#000';
+    ctx.shadowBlur = 0;
+    ctx.beginPath();
+    ctx.arc(cx - faceW * 0.2 + shake, cy - faceH * 0.1, eyeSize * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + faceW * 0.2 + shake, cy - faceH * 0.1, eyeSize * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Huge mouth with teeth
+    ctx.fillStyle = '#110000';
+    ctx.fillRect(cx - faceW * 0.3, cy + faceH * 0.1, faceW * 0.6, faceH * 0.25);
+
+    // Teeth
+    ctx.fillStyle = '#ffffff';
+    const teethCount = 10;
+    const teethW = (faceW * 0.6) / teethCount;
+    for (let t = 0; t < teethCount; t++) {
+      // Top teeth
+      ctx.beginPath();
+      ctx.moveTo(cx - faceW * 0.3 + t * teethW, cy + faceH * 0.1);
+      ctx.lineTo(cx - faceW * 0.3 + t * teethW + teethW * 0.7, cy + faceH * 0.1);
+      ctx.lineTo(cx - faceW * 0.3 + t * teethW + teethW * 0.35, cy + faceH * 0.18);
+      ctx.fill();
+      // Bottom teeth
+      ctx.beginPath();
+      ctx.moveTo(cx - faceW * 0.3 + t * teethW, cy + faceH * 0.35);
+      ctx.lineTo(cx - faceW * 0.3 + t * teethW + teethW * 0.7, cy + faceH * 0.35);
+      ctx.lineTo(cx - faceW * 0.3 + t * teethW + teethW * 0.35, cy + faceH * 0.27);
+      ctx.fill();
+    }
+
+    // Monster name
+    ctx.fillStyle = '#ff0000';
+    ctx.font = 'bold 30px monospace';
+    ctx.textAlign = 'center';
+    ctx.shadowColor = '#ff0000';
+    ctx.shadowBlur = 20;
+    ctx.fillText(jumpscareMonster.name.toUpperCase(), cx, cy - faceH * 0.35);
+    ctx.shadowBlur = 0;
+    ctx.textAlign = 'left';
+  } else {
+    // Starvation death — just darkness and red
+    ctx.fillStyle = '#ff0000';
+    ctx.globalAlpha = 0.5 + Math.sin(jumpscareTimer * 0.5) * 0.3;
+    ctx.font = 'bold 60px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('STARVED', cx, cy);
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'left';
+  }
+
+  // Static overlay
+  ctx.globalAlpha = 0.15;
+  for (let i = 0; i < 200; i++) {
+    const sx = Math.random() * canvas.width;
+    const sy = Math.random() * canvas.height;
+    ctx.fillStyle = Math.random() > 0.5 ? '#fff' : '#000';
+    ctx.fillRect(sx, sy, 3, 2);
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.restore();
+}
+
+function drawCamera() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const room = rooms[cameraRoom];
+  const scale = Math.min(canvas.width / room.w, (canvas.height - 80) / room.h) * 0.8;
+  const ox = (canvas.width - room.w * scale) / 2 - room.x * scale;
+  const oy = 50 - room.y * scale + (canvas.height - 80 - room.h * scale) / 2;
+
+  ctx.save();
+  ctx.scale(scale, scale);
+  ctx.translate(ox / scale, oy / scale);
+
+  // Draw the room
+  ctx.fillStyle = room.color;
+  ctx.fillRect(room.x, room.y, room.w, room.h);
+
+  // Draw room platforms
+  platforms.forEach(p => {
+    if (p.x + p.w > room.x && p.x < room.x + room.w && p.y + p.h > room.y && p.y < room.y + room.h) {
+      ctx.fillStyle = p.color || COLORS.wall;
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+    }
+  });
+
+  // Draw monsters in this room
+  monsters.forEach(m => {
+    if (!m.alive || m.room !== room.name) return;
+    ctx.fillStyle = m.color;
+    ctx.fillRect(m.x, m.y, m.w, m.h);
+    // Glowing eyes
+    ctx.fillStyle = m.eyeColor;
+    ctx.shadowColor = m.eyeColor;
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.arc(m.x + 10, m.y + 10, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(m.x + 26, m.y + 10, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    // Name
+    ctx.fillStyle = '#ff4444';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(m.name, m.x + m.w/2, m.y - 5);
+    ctx.textAlign = 'left';
+  });
+
+  // Draw items in this room
+  items.forEach(item => {
+    if (item.collected) return;
+    if (item.x < room.x || item.x > room.x + room.w || item.y < room.y || item.y > room.y + room.h) return;
+    if (item.type === 'coin') { ctx.fillStyle = COLORS.coin; }
+    else if (item.type === 'apple') { ctx.fillStyle = COLORS.apple; }
+    else if (item.type === 'flashlight') { ctx.fillStyle = COLORS.flashlight; }
+    else if (item.type === 'snowball') { ctx.fillStyle = COLORS.snowball; }
+    ctx.beginPath();
+    ctx.arc(item.x, item.y, 6, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  ctx.restore();
+
+  // Camera UI overlay
+  // Green tint
+  ctx.fillStyle = 'rgba(0,30,0,0.3)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Scanlines
+  ctx.fillStyle = 'rgba(0,0,0,0.1)';
+  for (let y = 0; y < canvas.height; y += 4) {
+    ctx.fillRect(0, y, canvas.width, 2);
+  }
+
+  // Static effect when switching
+  if (cameraStatic > 0) {
+    ctx.globalAlpha = cameraStatic / 10;
+    for (let i = 0; i < 500; i++) {
+      ctx.fillStyle = Math.random() > 0.5 ? '#aaffaa' : '#003300';
+      ctx.fillRect(Math.random() * canvas.width, Math.random() * canvas.height, 4, 3);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Camera name and controls
+  ctx.fillStyle = '#00ff00';
+  ctx.font = 'bold 16px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('CAM ' + (cameraRoom + 1) + ' - ' + room.name, canvas.width / 2, 30);
+
+  // Room has monster?
+  const roomMonsters = monsters.filter(m => m.alive && m.room === room.name);
+  if (roomMonsters.length > 0) {
+    ctx.fillStyle = '#ff0000';
+    ctx.fillText('⚠ MONSTER DETECTED ⚠', canvas.width / 2, canvas.height - 40);
+  }
+
+  ctx.fillStyle = '#00aa00';
+  ctx.font = '12px monospace';
+  ctx.fillText('[A/D] Switch camera   [C] Close', canvas.width / 2, canvas.height - 15);
+
+  // REC indicator
+  ctx.fillStyle = '#ff0000';
+  ctx.beginPath();
+  ctx.arc(30, 25, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#ff0000';
+  ctx.font = 'bold 14px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('REC', 42, 30);
+
+  // Timestamp
+  const d = new Date();
+  ctx.fillStyle = '#00ff00';
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0'), canvas.width - 20, 30);
+  ctx.textAlign = 'left';
+}
+
+function drawNote() {
+  ctx.fillStyle = 'rgba(0,0,0,0.85)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (!activeNote) return;
+
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+
+  // Paper background
+  ctx.fillStyle = '#d4c5a0';
+  ctx.fillRect(cx - 200, cy - 150, 400, 300);
+  // Paper shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fillRect(cx - 195, cy + 155, 400, 5);
+
+  // Stains on paper
+  ctx.fillStyle = 'rgba(100,60,30,0.15)';
+  ctx.beginPath();
+  ctx.arc(cx + 80, cy - 50, 40, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Title
+  ctx.fillStyle = '#cc2222';
+  ctx.font = 'bold 18px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(activeNote.title, cx, cy - 110);
+
+  // Text content
+  ctx.fillStyle = '#2a1a0a';
+  ctx.font = '14px monospace';
+  const lines = activeNote.text.split('\n');
+  lines.forEach((line, i) => {
+    ctx.fillText(line, cx, cy - 60 + i * 24);
+  });
+
+  // Notes collected counter
+  ctx.fillStyle = '#888';
+  ctx.font = '12px monospace';
+  ctx.fillText('Notes found: ' + collectedNotes.length + '/' + notes.length, cx, cy + 120);
+
+  // Close hint
+  ctx.fillStyle = '#666';
+  ctx.fillText('Press SPACE to close', cx, cy + 145);
+  ctx.textAlign = 'left';
+}
+
+function drawShop() {
+  ctx.fillStyle = '#0a0510';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = '#cc8800';
+  ctx.font = 'bold 28px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('CHARACTER SHOP', canvas.width / 2, 50);
+
+  ctx.fillStyle = COLORS.coin;
+  ctx.font = '16px monospace';
+  ctx.fillText('Coins: ' + player.coins, canvas.width / 2, 80);
+
+  shopChars.forEach((charKey, i) => {
+    const def = characterDefs[charKey];
+    const y = 120 + i * 70;
+    const selected = i === shopSelection;
+    const owned = player.unlockedChars.includes(charKey);
+    const active = player.character === charKey;
+
+    // Selection highlight
+    if (selected) {
+      ctx.fillStyle = 'rgba(255,255,255,0.1)';
+      ctx.fillRect(canvas.width / 2 - 150, y - 5, 300, 55);
+    }
+
+    // Character color swatch
+    ctx.fillStyle = def.color;
+    ctx.fillRect(canvas.width / 2 - 130, y + 5, 20, 20);
+
+    // Name
+    ctx.fillStyle = selected ? '#ffffff' : '#888888';
+    ctx.font = '16px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(def.name, canvas.width / 2 - 100, y + 20);
+
+    // Status
+    ctx.textAlign = 'right';
+    if (active) {
+      ctx.fillStyle = '#33ff33';
+      ctx.fillText('ACTIVE', canvas.width / 2 + 140, y + 20);
+    } else if (owned) {
+      ctx.fillStyle = '#8888ff';
+      ctx.fillText('OWNED', canvas.width / 2 + 140, y + 20);
+    } else {
+      ctx.fillStyle = COLORS.coin;
+      ctx.fillText(def.cost + ' coins', canvas.width / 2 + 140, y + 20);
+    }
+
+    // Description
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#666';
+    ctx.font = '11px monospace';
+    let desc = '';
+    if (charKey === 'fighter') desc = 'Double punch & kick damage';
+    else if (charKey === 'spiky') desc = 'Monsters take damage when they hit you';
+    else if (charKey === 'army') desc = '20 HP instead of 15';
+    else if (charKey === 'snow') desc = 'Snowball freezes for 6 seconds';
+    ctx.fillText(desc, canvas.width / 2 - 100, y + 40);
+  });
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#666';
+  ctx.font = '12px monospace';
+  ctx.fillText('[W/S] Select  [Enter] Buy/Switch  [E] Close', canvas.width / 2, canvas.height - 30);
+  ctx.textAlign = 'left';
+}
+
+function drawDeathScreen() {
+  ctx.fillStyle = 'rgba(100,0,0,0.7)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = '#ff0000';
+  ctx.font = 'bold 40px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('YOU DIED', canvas.width / 2, canvas.height / 2 - 20);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '16px monospace';
+  ctx.fillText('Press SPACE to try again', canvas.width / 2, canvas.height / 2 + 30);
+  ctx.textAlign = 'left';
+}
+
+function resetGame() {
+  player.x = 1200;
+  player.y = 750;
+  player.vx = 0;
+  player.vy = 0;
+  player.hp = characterDefs[player.character].hp;
+  player.maxHp = characterDefs[player.character].hp;
+  player.hunger = 100;
+  player.dead = false;
+  player.invincible = 0;
+  player.attacking = false;
+  player.flashlightOn = false;
+  player.inventory = { flashlight: 0, snowball: 0 };
+
+  // Reset monsters
+  monsters.forEach(m => {
+    m.hp = m.maxHp;
+    m.alive = true;
+    m.frozen = false;
+    const room = rooms.find(r => r.name === m.room);
+    m.x = room.x + room.w / 2 + (m.id === 4 ? 100 : 0);
+    m.y = room.y + room.h - TILE - 44;
+  });
+
+  // Reset items
+  items.forEach(i => i.collected = false);
+
+  // Reset notes
+  notes.forEach(n => n.collected = false);
+  collectedNotes = [];
+  activeNote = null;
+  jumpscareMonster = null;
+  cameraActive = false;
+
+  // Keep coins and unlocked characters
+}
+
+// === GAME LOOP ===
+function gameLoop() {
+  update();
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+// Start
+gameLoop();
+
+// Click/tap to init audio
+document.addEventListener('click', initAudio, { once: true });
+document.addEventListener('touchstart', initAudio, { once: true });
+</script>
+</body>
+</html>
