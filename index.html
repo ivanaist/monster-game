@@ -2214,8 +2214,10 @@ function drawTitle() {
   ctx.fillText('A scary hotel awaits...', canvas.width / 2, canvas.height / 2 + 60);
 
   ctx.fillStyle = '#888';
-  ctx.font = '14px monospace';
-  ctx.fillText('Game by Eero Puhakka', canvas.width / 2, canvas.height - 40);
+  ctx.font = '18px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('Game by Eero Puhakka', 20, canvas.height - 30);
+  ctx.textAlign = 'center';
   ctx.textAlign = 'left';
 
   // Creepy eyes in background
