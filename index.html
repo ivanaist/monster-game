@@ -2212,6 +2212,10 @@ function drawTitle() {
   ctx.font = '16px monospace';
   ctx.fillText('Press SPACE to start', canvas.width / 2, canvas.height / 2 + 30);
   ctx.fillText('A scary hotel awaits...', canvas.width / 2, canvas.height / 2 + 60);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '14px monospace';
+  ctx.fillText('Game by Eero Puhakka', canvas.width / 2, canvas.height - 40);
   ctx.textAlign = 'left';
 
   // Creepy eyes in background
